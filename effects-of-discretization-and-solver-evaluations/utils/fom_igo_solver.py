@@ -133,6 +133,8 @@ class FOMIGOSolver:
             )
 
         self._pruned_steps_total = 0
+        self._pruned_rollouts_total = 0
+        self._total_rollouts = 0
         self._evaluated_steps_total = 0
         self._validate_pregenerated_samples()
 
@@ -302,6 +304,7 @@ class FOMIGOSolver:
                 )
 
             n_samples = self.calculate_number_of_samples(i)
+            self._total_rollouts += n_samples
             (
                 u,
                 A_blocks,
@@ -424,7 +427,11 @@ class FOMIGOSolver:
                     pruned_global = act_idx[prune_mask]
                     if pruned_global.size:
                         active[pruned_global] = False
-                        lex_cost[pruned_global] = lower_bound[prune_mask]
+                        # A pruned rollout is discarded, not scored by its
+                        # lower bound. Otherwise an optimistic lower bound
+                        # could incorrectly enter the elite set.
+                        lex_cost[pruned_global] = np.inf
+                        self._pruned_rollouts_total += int(pruned_global.size)
                         self._pruned_steps_total += int(
                             pruned_global.size * (self.K - 1 - k_next)
                         )
@@ -501,6 +508,31 @@ class FOMIGOSolver:
         for k in range(self.K - 1):
             x[:, k + 1] = self.sys.f(x[:, k], u[:, k])
         return x, x
+
+    def get_diagnostics(self):
+        """Return deterministic rollout/pruning accounting for benchmark use."""
+        total_possible_transitions = self._total_rollouts * self.control_horizon
+        return {
+            "total_rollouts": int(self._total_rollouts),
+            "pruned_rollouts": int(self._pruned_rollouts_total),
+            "evaluated_transitions": int(self._evaluated_steps_total),
+            "pruned_transitions": int(self._pruned_steps_total),
+            "rollout_effective_rate": (
+                1.0 - self._pruned_rollouts_total / self._total_rollouts
+                if self._total_rollouts
+                else 1.0
+            ),
+            "transition_effective_rate": (
+                self._evaluated_steps_total / total_possible_transitions
+                if total_possible_transitions
+                else 1.0
+            ),
+            "transition_reduction_rate": (
+                1.0 - self._evaluated_steps_total / total_possible_transitions
+                if total_possible_transitions
+                else 0.0
+            ),
+        }
 
     def calculate_path_cost(self, x, y, w, u, lamb, cov_inv):
         # Legacy API. MPPI path-integral correction is intentionally ignored.

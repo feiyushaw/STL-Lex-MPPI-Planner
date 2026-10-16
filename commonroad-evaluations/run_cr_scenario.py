@@ -11,7 +11,7 @@ from lex_stl_planner.utils.visualization import generate_outputs
 def main():
     # Select planner
     planner_type = (
-        "mppi"  # "mppi" or "const_input" or "frenet" or "cmaes" or "sa" or "de"
+        "igo"  # "igo" (canonical) or "mppi" (compatibility alias)
     )
 
     # Load configuration
@@ -123,7 +123,7 @@ def main():
         cost_opt_history,
         sub_cost_cont_opt_history,
         sub_cost_disc_opt_history,
-        planner.getParameterSchedule() if planner_type == "mppi" else None,
+        planner.getParameterSchedule() if planner_type in ("igo", "mppi") else None,
         considered_obstacles_history,
         planner.getProfilerStats(),
         plot_costs=False,

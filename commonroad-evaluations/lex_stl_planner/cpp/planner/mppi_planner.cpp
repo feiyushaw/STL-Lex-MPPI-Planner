@@ -349,7 +349,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     if (use_block_xnes)
     {
         FOMIGOBlockUpdater::updateBlockXNES(
-            control_input, A_blocks, block_slices_, eps, elite_indices, lr_mean_, lr_cov_);
+            control_input, A_blocks, block_slices_, standard_samples, elite_indices, lr_mean_, lr_cov_);
         if (APPLY_INPUT_CONSTRAINTS)
         {
             applyInputConstraints(control_input);
@@ -481,11 +481,19 @@ int MPPIPlanner::calculateNumberOfSamples(int iteration) const
     }
     else if (sample_count_decay_method_ == "linear")
     {
+        if (num_iterations_ <= 1)
+        {
+            return n_samples_initial_;
+        }
         double ratio = static_cast<double>(iteration) / (num_iterations_ - 1);
         return static_cast<int>(n_samples_initial_ - (n_samples_initial_ - n_samples_final_) * ratio);
     }
     else if (sample_count_decay_method_ == "cosine")
     {
+        if (num_iterations_ <= 1)
+        {
+            return n_samples_initial_;
+        }
         double ratio = 0.5 * (1 - std::cos(M_PI * iteration / (num_iterations_ - 1)));
         return static_cast<int>(n_samples_initial_ - (n_samples_initial_ - n_samples_final_) * ratio);
     }

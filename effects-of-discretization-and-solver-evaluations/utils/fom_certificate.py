@@ -226,7 +226,9 @@ class SemiLagrangianFOMCertificate:
         out[valid] = result
         return out
 
-    def _bellman_backup(self, previous: Array) -> Array:
+    def _bellman_backup(
+        self, previous: Array, *, enforce_monotone: bool = True
+    ) -> Array:
         nodes = self.nodes
         admissible = np.asarray(self.problem.admissible(nodes), dtype=bool)
         candidate = np.full(nodes.shape[0], np.inf, dtype=float)
@@ -271,7 +273,7 @@ class SemiLagrangianFOMCertificate:
                 spacing = float(np.max(np.diff(np.sort(controls_flat))))
                 candidate[np.isfinite(candidate)] -= 0.5 * L_u * spacing
 
-        if self._monotone_start:
+        if enforce_monotone and self._monotone_start:
             finite_both = np.isfinite(candidate) & np.isfinite(previous)
             candidate[finite_both] = np.maximum(
                 candidate[finite_both], previous[finite_both]
@@ -625,7 +627,7 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_terminal = self._estimate_terminal_error(selected)
         self._epsilon = self._estimate_slack_error(selected)
 
-        backup = self._bellman_backup(selected)
+        backup = self._bellman_backup(selected, enforce_monotone=False)
         finite = np.isfinite(selected) & np.isfinite(backup)
         self._discrete_subsolution = bool(
             np.all(backup[finite] >= selected[finite] - 1e-9)

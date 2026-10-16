@@ -163,7 +163,7 @@ PlannerResult MPPIPlanner::planImpl(const Eigen::MatrixXd &u_init)
     trajectory_samples.reserve(num_iterations_);
 
     Eigen::MatrixXd best_overall_sample = u;
-    Eigen::MatrixXd initial_y = forwardRollout(u).second;
+    Eigen::MatrixXd initial_y = std::get<1>(forwardRollout(u));
     BaseCostFunction *initial_cost_func = thread_local_cost_functions_[0].get();
     uint64_t best_overall_cost = initial_cost_func->evaluate(initial_y);
 

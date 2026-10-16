@@ -242,7 +242,6 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     const std::vector<Eigen::MatrixXd> &latent_samples =
         precomputed_standard_samples_[iteration];
     const std::vector<std::pair<int, int>> &thread_ranges = thread_sample_ranges_[iteration];
-    const bool use_block_xnes = true;
 
 #pragma omp parallel if (max_threads_ > 1)
     {
@@ -285,7 +284,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                     // whitened coordinates s, before projection.
                 }
 
-                if (use_block_xnes && enable_certificate_pruning_)
+                if (enable_certificate_pruning_)
                 {
                     auto [pruned, x_sample, y_sample, pruned_cost] =
                         forwardRolloutWithCertificatePruning(u_sample, incumbent_best_cost);
@@ -355,18 +354,11 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
         });
 
     std::vector<int> elite_indices(indices.begin(), indices.begin() + n_elite);
-    if (use_block_xnes)
+    FOMIGOBlockUpdater::updateBlockXNES(
+        control_input, A_blocks, block_slices_, standard_samples, elite_indices, lr_mean_, lr_cov_);
+    if (APPLY_INPUT_CONSTRAINTS)
     {
-        FOMIGOBlockUpdater::updateBlockXNES(
-            control_input, A_blocks, block_slices_, standard_samples, elite_indices, lr_mean_, lr_cov_);
-        if (APPLY_INPUT_CONSTRAINTS)
-        {
-            applyInputConstraints(control_input);
-        }
-    }
-    else
-    {
-        throw std::logic_error("FOM-IGO requires the block xNES update path");
+        applyInputConstraints(control_input);
     }
 
     int best_overall_sample_idx = indices[0];

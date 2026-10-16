@@ -265,7 +265,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                 for (size_t b = 0; b < block_slices_.size(); ++b)
                 {
                     const int s_col = block_slices_[b].first;
-                    const int n_cols = block_slices_[b].second;
+                    const int n_cols = block_slices_[b].second - block_slices_[b].first;
                     const int dim_b = u_dim_ * n_cols;
                     const Eigen::VectorXd s_vec =
                         Eigen::Map<const Eigen::VectorXd>(

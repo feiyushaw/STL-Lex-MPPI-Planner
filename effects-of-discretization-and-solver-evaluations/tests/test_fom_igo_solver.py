@@ -65,7 +65,7 @@ def test_pregenerated_samples_are_whitened_latents():
 
 
 def test_elite_rank_update_moves_mean_toward_better_samples():
-    samples = np.zeros((1, 4, 1, 3), dtype=float)
+    samples = np.zeros((1, 4, 1, 2), dtype=float)
     samples[0, :, 0, 0] = np.array([-2.0, -1.0, 1.0, 2.0])
 
     solver = make_solver(

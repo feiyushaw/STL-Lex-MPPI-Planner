@@ -126,3 +126,5 @@ def test_partial_block_update_uses_endpoint_width():
 
     assert [a.shape for a in A_blocks] == [(3, 3), (3, 3), (1, 1)]
     assert np.all(np.isfinite(u))
+    assert u.shape == (1, 7)
+    assert u[0, -1] == 0.0

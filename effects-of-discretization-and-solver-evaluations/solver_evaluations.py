@@ -24,7 +24,7 @@ def pregenerate_igo_latents(
 ):
     """Pre-generate whitened IGO latent samples s ~ N(0,I)."""
     rng = np.random.default_rng(seed)
-    return rng.standard_normal((n_iterations, n_samples, u_dim, K))
+    return rng.standard_normal((n_iterations, n_samples, u_dim, K - 1))
 
 
 def load_scenarios(filepath):
@@ -120,7 +120,7 @@ def evaluate_scenario_igo(
             igo_num_iterations,
             igo_n_samples,
             1,
-            K,
+            K - 1,
         )
         if pregenerated_igo_samples.shape[0] < expected_shape[0] or \
            pregenerated_igo_samples.shape[1] < expected_shape[1]:

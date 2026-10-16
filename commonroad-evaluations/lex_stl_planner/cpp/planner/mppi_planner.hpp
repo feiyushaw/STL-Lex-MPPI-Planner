@@ -91,6 +91,7 @@ private:
 
     // Configuration parameters
     unsigned int seed_;
+    int control_horizon_;
     int n_samples_initial_;
     int num_iterations_;
     int max_threads_;

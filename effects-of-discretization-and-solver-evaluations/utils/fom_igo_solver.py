@@ -288,6 +288,11 @@ class FOMIGOSolver:
         _, initial_y = self.forward_rollout(u)
         self.best_overall_u = u.copy()
         self.best_overall_lex_cost = float(self.evaluate(initial_y))
+        # Lex cost 0 is the satisfied/feasible state for this encoder.
+        # Certificate pruning must never use an infeasible trajectory as an
+        # incumbent upper bound.
+        if self.best_overall_lex_cost == 0.0:
+            self.best_feasible_lex_cost = 0.0
 
         t_start = time.time()
 
@@ -448,6 +453,8 @@ class FOMIGOSolver:
         if best_candidate_lex < self.best_overall_lex_cost:
             self.best_overall_lex_cost = best_candidate_lex
             self.best_overall_u = u_samples[best_idx].copy()
+        if best_candidate_lex == 0.0:
+            self.best_feasible_lex_cost = 0.0
 
         n_elite = max(
             1,

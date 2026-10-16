@@ -99,6 +99,7 @@ class FOMCertificateProblem:
     initial_lower_bound: Optional[Callable[[Array], Array]] = None
     terminal_cost_lipschitz: float = 0.0
     terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
+    control_lipschitz_bound: Optional[Callable[[Array, "RegularGrid"], float]] = None
 
 
 @dataclass(frozen=True)
@@ -246,10 +247,26 @@ class SemiLagrangianFOMCertificate:
                 & np.isfinite(next_value)
                 & np.isfinite(stage)
             )
-            candidate[feasible] = np.minimum(
-                candidate[feasible],
-                self.problem.dt * stage[feasible] + next_value[feasible],
+            if np.any(feasible):
+                candidate[feasible] = np.minimum(
+                    candidate[feasible],
+                    self.problem.dt * stage[feasible] + next_value[feasible],
+                )
+
+        # A finite control grid is an approximation of the continuous infimum.
+        # For a scalar control, subtract a Lipschitz interpolation error before
+        # accepting the Bellman backup. This is essential for a lower-bound
+        # certificate: min over a control subset is otherwise an upper bound.
+        if self.problem.control_lipschitz_bound is not None:
+            L_u = float(
+                self.problem.control_lipschitz_bound(
+                    previous, self.grid
+                )
             )
+            controls_flat = np.asarray(self.problem.controls, dtype=float).reshape(-1)
+            if controls_flat.size > 1:
+                spacing = float(np.max(np.diff(np.sort(controls_flat))))
+                candidate[np.isfinite(candidate)] -= 0.5 * L_u * spacing
 
         if self._monotone_start:
             finite_both = np.isfinite(candidate) & np.isfinite(previous)
@@ -754,6 +771,18 @@ def make_paper_unicycle_problem(
         closest = np.clip(goal[:2], lo[:2], hi[:2])
         return bool(np.linalg.norm(closest - goal[:2]) <= goal_radius)
 
+    def control_lipschitz_bound(values: Array, grid: RegularGrid) -> float:
+        grad_phi = np.gradient(
+            values.reshape(grid.shape),
+            *grid.spacing,
+            edge_order=1,
+        )[2]
+        max_grad_phi = float(np.nanmax(np.abs(grad_phi[np.isfinite(grad_phi)])))
+        max_u = max(abs(control_min), abs(control_max))
+        # d/du V(x + dt f(x,u)) = dt * V_phi for the constant-speed
+        # unicycle, while d/du (r_u u^2) = 2 r_u u.
+        return dt * max_grad_phi + 2.0 * r_control * max_u
+
     return FOMCertificateProblem(
         dynamics=dynamics,
         running_cost=running_cost,
@@ -765,6 +794,7 @@ def make_paper_unicycle_problem(
         initial_lower_bound=terminal_cost,
         terminal_cost_lipschitz=0.0,
         terminal_cell_intersects=terminal_cell_intersects,
+        control_lipschitz_bound=control_lipschitz_bound,
     )
 
 

@@ -617,10 +617,11 @@ def make_paper_unicycle_problem(
         return ok
 
     def terminal_set(x: Array) -> Array:
-        return (
+        target = (
             np.linalg.norm(x[:, :2] - goal[:2], axis=1)
             <= goal_radius
         )
+        return target & admissible(x)
 
     def terminal_cell_intersects(lo: Array, hi: Array) -> bool:
         closest = np.clip(goal[:2], lo[:2], hi[:2])

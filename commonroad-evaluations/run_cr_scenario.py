@@ -11,7 +11,7 @@ from lex_stl_planner.utils.visualization import generate_outputs
 def main():
     # Select planner
     planner_type = (
-        "igo"  # "igo" (canonical) or "mppi" (compatibility alias)
+        "igo"  # "igo" is canonical; "mppi" remains a compatibility alias
     )
 
     # Load configuration

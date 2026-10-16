@@ -72,9 +72,9 @@ def generate_outputs(
             output_dir,
         )
 
-    # ---- MPPI-specific outputs ---------------
+    # ---- IGO-specific outputs ---------------
     if mppi_parameter_schedule is not None:
-        plot_mppi_parameter_schedule(mppi_parameter_schedule, output_dir)
+        plot_igo_parameter_schedule(mppi_parameter_schedule, cfg, output_dir)
 
     # ---- Scenario dependent outputs ---------------
     if scenario.__class__.__name__ == "SimpleScenario":
@@ -1405,129 +1405,81 @@ def plot_sample_robustness_evaluation(
     plt.close(fig_cost)
 
 
-def plot_mppi_parameter_schedule(parameter_schedule, output_dir="output"):
+def plot_igo_parameter_schedule(parameter_schedule, cfg=None, output_dir="output"):
     """
-    Plots the MPPI parameter schedules over iterations in four subplots.
+    Plot the parameters that actually control the IGO/xNES backend.
 
-    Parameters:
-    - parameter_schedule: ParameterSchedule object containing:
-        - beta_schedule: list of beta values
-        - covariance_schedule: list of covariance matrices (diagonal)
-        - lambda_schedule: list of lambda values
-        - sample_count_schedule: list of sample counts
-    - output_dir: directory to save the plot
+    The legacy beta/lambda schedules are intentionally not shown because they
+    are compatibility metadata and are not used by the active optimizer.
     """
+    sample_count_schedule = list(parameter_schedule.sample_count_schedule)
+    iterations = np.arange(len(sample_count_schedule))
 
-    # Extract data from parameter history
-    beta_schedule = parameter_schedule.beta_schedule
-    covariance_schedule = parameter_schedule.covariance_schedule
-    lambda_schedule = parameter_schedule.lambda_schedule
-    sample_count_schedule = parameter_schedule.sample_count_schedule
+    elite_quantile = 0.05
+    block_steps = 5
+    lr_mean = 1.0
+    lr_cov = 0.25
+    covariance = None
+    if cfg is not None:
+        igo_cfg = cfg.planner.mppi.igo
+        elite_quantile = float(igo_cfg.elite_quantile)
+        block_steps = int(igo_cfg.block_steps)
+        lr_mean = float(igo_cfg.lr_mean)
+        lr_cov = float(igo_cfg.lr_cov)
+        covariance = np.asarray(cfg.planner.mppi.initial_covariance)
 
-    n_iterations = len(beta_schedule)
-    iterations = np.arange(n_iterations)
-
-    # Create figure with 2x2 subplots
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    fig.suptitle("MPPI Parameter History", fontsize=16, fontweight="bold")
+    fig.suptitle("IGO/xNES Parameter History", fontsize=16, fontweight="bold")
 
-    # Plot 1: Beta history
     axes[0, 0].plot(
-        iterations, beta_schedule, "b-", marker="o", linewidth=2, markersize=4
+        iterations,
+        sample_count_schedule,
+        marker="o",
+        linewidth=2,
     )
     axes[0, 0].set_xlabel("Iteration")
-    axes[0, 0].set_ylabel("Beta")
-    axes[0, 0].set_title("Beta Shrinking")
+    axes[0, 0].set_ylabel("Number of Samples")
+    axes[0, 0].set_title("Sample Count")
     axes[0, 0].grid(True, alpha=0.3)
     axes[0, 0].set_ylim(bottom=0)
 
-    # Plot 2: Number of samples history
-    axes[0, 1].plot(
-        iterations, sample_count_schedule, "g-", marker="o", linewidth=2, markersize=4
+    axes[0, 1].bar(
+        ["Elite Quantile", "Block Steps"],
+        [elite_quantile, block_steps],
     )
-    axes[0, 1].set_xlabel("Iteration")
-    axes[0, 1].set_ylabel("Number of Samples")
-    axes[0, 1].set_title("Sample Count")
-    axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].set_ylim(bottom=0)
+    axes[0, 1].set_title("IGO Selection / Block Structure")
+    axes[0, 1].grid(True, alpha=0.3, axis="y")
 
-    # Plot 3: Lambda history (second row, left)
-    axes[1, 0].plot(
-        iterations, lambda_schedule, "r-", marker="o", linewidth=2, markersize=4
+    axes[1, 0].bar(
+        ["Mean LR", "Covariance LR"],
+        [lr_mean, lr_cov],
     )
-    axes[1, 0].set_xlabel("Iteration")
-    axes[1, 0].set_ylabel("Lambda")
-    axes[1, 0].set_title("Lambda Parameter")
-    axes[1, 0].grid(True, alpha=0.3)
-    axes[1, 0].set_ylim(bottom=0)
+    axes[1, 0].set_title("xNES Learning Rates")
+    axes[1, 0].grid(True, alpha=0.3, axis="y")
 
-    # Plot 4: Covariance diagonal elements with dual y-axes (second row, right)
-    # Extract diagonal elements from each covariance matrix (assuming 2x2)
-    if covariance_schedule:
-        # Extract diagonal elements for both dimensions
-        cov_dim1 = [
-            cov_matrix[0, 0] for cov_matrix in covariance_schedule
-        ]  # First diagonal element
-        cov_dim2 = [
-            cov_matrix[1, 1] for cov_matrix in covariance_schedule
-        ]  # Second diagonal element
-
-        # Plot first dimension on left y-axis
-        ax_left = axes[1, 1]
-        line1 = ax_left.plot(
-            iterations,
-            cov_dim1,
-            "b-",
-            marker="o",
-            linewidth=2,
-            markersize=4,
-            label="Dim 1",
+    if covariance is not None and covariance.ndim == 2:
+        axes[1, 1].bar(
+            np.arange(covariance.shape[0]),
+            np.diag(covariance),
         )
-        ax_left.set_xlabel("Iteration")
-        ax_left.set_ylabel("Covariance Dim 1", color="b")
-        ax_left.tick_params(axis="y", labelcolor="b")
-        ax_left.grid(True, alpha=0.3)
-        ax_left.set_ylim(bottom=0)
-
-        # Create second y-axis for second dimension
-        ax_right = ax_left.twinx()
-        line2 = ax_right.plot(
-            iterations,
-            cov_dim2,
-            "r-",
-            marker="s",
-            linewidth=2,
-            markersize=4,
-            label="Dim 2",
-        )
-        ax_right.set_ylabel("Covariance Dim 2", color="r")
-        ax_right.tick_params(axis="y", labelcolor="r")
-        ax_right.set_ylim(bottom=0)
-
-        # Set title
-        ax_left.set_title("Covariance Matrix Diagonal Elements")
-
-        # Create combined legend
-        lines = line1 + line2
-        labels = [line.get_label() for line in lines]
-        ax_left.legend(lines, labels, loc="upper right")
-
-    # Set integer ticks for iterations on all subplots
-    for ax in axes.flat:
-        ax.set_xticks(iterations[:: max(1, len(iterations) // 10)])  # Show max 10 ticks
-        ax.tick_params(axis="x", which="major", labelsize=10)
-        ax.tick_params(axis="y", which="major", labelsize=10)
+        axes[1, 1].set_xlabel("Control Dimension")
+        axes[1, 1].set_ylabel("Initial Variance")
+        axes[1, 1].set_title("Initial Search Covariance")
+        axes[1, 1].set_xticks(np.arange(covariance.shape[0]))
+        axes[1, 1].grid(True, alpha=0.3, axis="y")
+    else:
+        axes[1, 1].axis("off")
 
     plt.tight_layout()
-
-    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-
-    # Save the plot
-    file_name = f"{output_dir}/mppi_parameter_schedule.png"
+    file_name = f"{output_dir}/igo_parameter_schedule.png"
     plt.savefig(file_name, bbox_inches="tight", dpi=300)
     plt.close(fig)
 
+
+def plot_mppi_parameter_schedule(parameter_schedule, output_dir="output"):
+    """Backward-compatible alias for the IGO parameter plot."""
+    return plot_igo_parameter_schedule(parameter_schedule, None, output_dir)
 
 def plot_commonroad_scenario_with_trajectories(
     scenario: CommonRoadScenario,

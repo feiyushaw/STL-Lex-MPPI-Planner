@@ -273,6 +273,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     std::vector<Eigen::MatrixXd> y(n_samples);
     Eigen::VectorXd total_costs(n_samples);
     std::vector<uint64_t> scalarized_costs(n_samples);
+    std::vector<bool> evaluated_sample(n_samples, false);
 
     std::atomic<bool> projection_error_occurred{false};
 
@@ -332,8 +333,12 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                         u_samples[n] = std::move(u_sample);
                         x[n] = std::move(x_sample);
                         y[n] = std::move(y_sample);
-                        scalarized_costs[n] = pruned_cost;
-                        total_costs[n] = static_cast<double>(pruned_cost);
+                        // A certificate-pruned rollout is discarded. Its
+                        // optimistic lower bound must never participate in
+                        // elite ranking as though it were an evaluated cost.
+                        scalarized_costs[n] = std::numeric_limits<uint64_t>::max();
+                        total_costs[n] = std::numeric_limits<double>::infinity();
+                        evaluated_sample[n] = false;
                         continue;
                     }
                     auto [total_cost, scalarized_cost] =
@@ -344,6 +349,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                     y[n] = std::move(y_sample);
                     total_costs[n] = total_cost;
                     scalarized_costs[n] = scalarized_cost;
+                    evaluated_sample[n] = true;
                 }
                 else
                 {
@@ -356,6 +362,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                     y[n] = std::move(y_sample);
                     total_costs[n] = total_cost;
                     scalarized_costs[n] = scalarized_cost;
+                    evaluated_sample[n] = true;
                 }
             }
             catch (...)
@@ -371,13 +378,29 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     }
 
     // IGO Quantile Ranking & Block-Diagonal xNES Natural Gradient Update (Section V-B)
+    std::vector<int> indices;
+    indices.reserve(n_samples);
+    for (int n = 0; n < n_samples; ++n)
+    {
+        if (evaluated_sample[n])
+        {
+            indices.push_back(n);
+        }
+    }
+
+    // Certificate pruning follows the paper's "terminate and discard"
+    // semantics. Never use a pruned lower bound as an elite observation.
+    if (indices.empty())
+    {
+        return {control_input, x, control_input, incumbent_best_cost};
+    }
+
     const int n_elite = std::max(
         1,
         std::min(
-            n_samples,
-            static_cast<int>(std::ceil(elite_quantile_ * static_cast<double>(n_samples)))));
-    std::vector<int> indices(n_samples);
-    std::iota(indices.begin(), indices.end(), 0);
+            static_cast<int>(indices.size()),
+            static_cast<int>(std::ceil(
+                elite_quantile_ * static_cast<double>(n_samples)))));
     std::partial_sort(
         indices.begin(),
         indices.begin() + n_elite,

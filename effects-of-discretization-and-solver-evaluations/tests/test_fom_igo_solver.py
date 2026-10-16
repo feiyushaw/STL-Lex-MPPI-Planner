@@ -50,6 +50,13 @@ def make_solver(**kwargs):
     )
 
 
+def test_generated_latents_match_effective_control_horizon():
+    solver = make_solver()
+    samples = solver._latent_samples(0, 4)
+    assert samples.shape == (4, 1, 2)
+    assert np.all(np.isfinite(samples))
+
+
 def test_pregenerated_samples_are_whitened_latents():
     samples = np.zeros((1, 4, 1, 2), dtype=float)
     samples[0, :, 0, :] = np.array(

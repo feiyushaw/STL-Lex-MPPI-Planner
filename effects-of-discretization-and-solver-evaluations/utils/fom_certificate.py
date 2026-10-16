@@ -98,6 +98,7 @@ class FOMCertificateProblem:
     dt: float
     initial_lower_bound: Optional[Callable[[Array], Array]] = None
     terminal_cost_lipschitz: float = 0.0
+    terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
 
 
 @dataclass(frozen=True)
@@ -282,10 +283,23 @@ class SemiLagrangianFOMCertificate:
             upper = nodal
             v = values.reshape(self.grid.shape)
             for cell in np.ndindex(cell_shape):
+                lo = np.array(
+                    [self.grid.lower[a] + cell[a] * h[a]
+                     for a in range(len(self.grid.shape))],
+                    dtype=float,
+                )
+                hi = lo + h
+                if self.problem.terminal_cell_intersects is not None:
+                    intersects = self.problem.terminal_cell_intersects(lo, hi)
+                else:
+                    intersects = bool(
+                        self.problem.terminal_set(((lo + hi) * 0.5)[None, :])[0]
+                    )
+                if not intersects:
+                    continue
                 corners = []
                 for bits in product((0, 1), repeat=len(self.grid.shape)):
                     idx = []
-                    point = []
                     for axis, bit in enumerate(bits):
                         n = self.grid.shape[axis]
                         j = cell[axis] + bit
@@ -294,15 +308,9 @@ class SemiLagrangianFOMCertificate:
                         else:
                             j = min(j, n - 1)
                         idx.append(j)
-                        point.append(
-                            self.grid.lower[axis]
-                            + j * h[axis]
-                        )
-                    p = np.asarray(point, dtype=float)
-                    if bool(self.problem.terminal_set(p[None, :])[0]):
-                        val = v[tuple(idx)]
-                        if np.isfinite(val):
-                            corners.append(float(val))
+                    val = v[tuple(idx)]
+                    if np.isfinite(val):
+                        corners.append(float(val))
                 if corners:
                     upper = max(upper, max(corners))
             return float(max(0.0, upper))
@@ -742,6 +750,10 @@ def make_paper_unicycle_problem(
             <= goal_radius
         )
 
+    def terminal_cell_intersects(lo: Array, hi: Array) -> bool:
+        closest = np.clip(goal[:2], lo[:2], hi[:2])
+        return bool(np.linalg.norm(closest - goal[:2]) <= goal_radius)
+
     return FOMCertificateProblem(
         dynamics=dynamics,
         running_cost=running_cost,
@@ -752,6 +764,7 @@ def make_paper_unicycle_problem(
         dt=dt,
         initial_lower_bound=terminal_cost,
         terminal_cost_lipschitz=0.0,
+        terminal_cell_intersects=terminal_cell_intersects,
     )
 
 

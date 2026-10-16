@@ -51,13 +51,13 @@ def make_solver(**kwargs):
 
 
 def test_pregenerated_samples_are_whitened_latents():
-    samples = np.zeros((1, 4, 1, 3), dtype=float)
+    samples = np.zeros((1, 4, 1, 2), dtype=float)
     samples[0, :, 0, :] = np.array(
         [
-            [-2.0, 0.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0],
+            [-2.0, 0.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
         ]
     )
     solver = make_solver(pregenerated_eps=samples)
@@ -98,7 +98,7 @@ def test_legacy_mppi_name_points_to_igo_backend():
 
 
 def test_partial_block_update_uses_endpoint_width():
-    samples = np.zeros((1, 4, 1, 7), dtype=float)
+    samples = np.zeros((1, 4, 1, 6), dtype=float)
     samples[0, 0, 0, :] = -1.0
     samples[0, 1, 0, :] = -0.5
 

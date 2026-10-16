@@ -55,10 +55,10 @@ option(BUILD_FOM_IGO_TESTS "Build FOM-IGO unit tests" ON)
 if(BUILD_FOM_IGO_TESTS)
     enable_testing()
     add_executable(fom_igo_block_updater_test
-        \${CMAKE_SOURCE_DIR}/lex_stl_planner/tests/fom_igo_block_updater_test.cpp
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/tests/fom_igo_block_updater_test.cpp
     )
     target_include_directories(fom_igo_block_updater_test PRIVATE
-        \${CMAKE_SOURCE_DIR}/lex_stl_planner/cpp/planner
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/cpp/planner
         \${EIGEN3_INCLUDE_DIR}
     )
     target_link_libraries(fom_igo_block_updater_test PRIVATE Eigen3::Eigen)

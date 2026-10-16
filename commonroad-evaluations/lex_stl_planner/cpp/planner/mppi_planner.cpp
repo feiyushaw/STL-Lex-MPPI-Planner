@@ -44,8 +44,6 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     }
     omp_set_num_threads(max_threads_);
 
-    block_slices_ = FOMIGOBlockUpdater::buildBlockSlices(K_, block_steps_);
-
     // Compute bit weight of highest-priority rule (OPERATIONAL_LIMITS) for Corollary 1 prefix pruning
     int total_bits = 0;
     std::vector<int> rule_bits;
@@ -60,6 +58,21 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     {
         op_limits_weight_ = static_cast<uint64_t>(1) << (total_bits - rule_bits[0]);
     }
+
+    const auto &igo_cfg = cfg.planner.mppi.igo;
+    block_steps_ = igo_cfg.block_steps;
+    elite_quantile_ = igo_cfg.elite_quantile;
+    lr_mean_ = igo_cfg.lr_mean;
+    lr_cov_ = igo_cfg.lr_cov;
+    enable_certificate_pruning_ = igo_cfg.enable_certificate_pruning;
+
+    if (block_steps_ <= 0 || elite_quantile_ <= 0.0 || elite_quantile_ > 1.0 ||
+        lr_mean_ < 0.0 || lr_cov_ < 0.0)
+    {
+        throw std::invalid_argument("Invalid FOM-IGO configuration");
+    }
+
+    block_slices_ = FOMIGOBlockUpdater::buildBlockSlices(K_, block_steps_);
 
     initializeParameterValues();
     precomputeSamples();
@@ -140,13 +153,15 @@ PlannerResult MPPIPlanner::planImpl(const Eigen::MatrixXd &u_init)
     trajectory_samples.reserve(num_iterations_);
 
     Eigen::MatrixXd best_overall_sample = u;
-    uint64_t best_overall_cost = std::numeric_limits<uint64_t>::max();
+    auto [initial_x, initial_y] = forwardRollout(u);
+    BaseCostFunction *initial_cost_func = thread_local_cost_functions_[0].get();
+    uint64_t best_overall_cost = initial_cost_func->evaluate(initial_y);
 
     const auto start_time = std::chrono::high_resolution_clock::now();
 
     for (int iteration = 0; iteration < num_iterations_; ++iteration)
     {
-        auto [u_new, samples, u_best, cost_best] = mppiStep(u, iteration, A_blocks, best_overall_cost);
+        auto [u_new, samples, u_best, cost_best] = igoStep(u, iteration, A_blocks, best_overall_cost);
 
         u = u_new;
         trajectory_samples.push_back(samples);
@@ -191,8 +206,8 @@ PlannerResult MPPIPlanner::planImpl(const Eigen::MatrixXd &u_init)
     return PlannerResult{final_x, final_u, cost, continuous_costs, discrete_costs, remaining_input_cost, solve_time, trajectory_samples, best_overall_x, true};
 }
 
-// Perform a single FOM-IGO (Block-xNES + Certificate Pruning) improvement step
-std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint64_t> MPPIPlanner::mppiStep(
+// Perform a single FOM-IGO (block-xNES + certificate pruning) improvement step.
+std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint64_t> MPPIPlanner::igoStep(
     Eigen::MatrixXd control_input,
     int iteration,
     std::vector<Eigen::MatrixXd> &A_blocks,
@@ -203,11 +218,9 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
         std::cout << "Processing FOM-IGO iteration: " << iteration + 1 << "/" << num_iterations_ << std::endl;
     }
 
-    const Eigen::MatrixXd &current_covariance = covariance_schedule_[iteration];
-    const double current_lambda = lambda_schedule_[iteration];
     const int n_samples = sample_count_schedule_[iteration];
 
-    std::vector<Eigen::MatrixXd> eps(n_samples);
+    std::vector<Eigen::MatrixXd> standard_samples(n_samples);
     std::vector<Eigen::MatrixXd> u_samples(n_samples);
     std::vector<Eigen::MatrixXd> x(n_samples);
     std::vector<Eigen::MatrixXd> y(n_samples);
@@ -216,17 +229,11 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
 
     std::atomic<bool> projection_error_occurred{false};
 
-    Eigen::MatrixXd cov_inv = current_covariance.inverse();
-    Eigen::VectorXd inv_sqrt_cov = current_covariance.diagonal().cwiseSqrt().cwiseInverse();
-    std::vector<Eigen::RowVectorXd> correction_weights(K_);
-    for (int k = 0; k < K_; ++k)
-    {
-        correction_weights[k] = current_lambda * control_input.col(k).transpose() * cov_inv;
-    }
-
-    const std::vector<Eigen::MatrixXd> &eps_samples = precomputed_eps_[iteration];
+    // Precomputed samples are already whitened latent vectors s ~ N(0,I).
+    const std::vector<Eigen::MatrixXd> &latent_samples =
+        precomputed_standard_samples_[iteration];
     const std::vector<std::pair<int, int>> &thread_ranges = thread_sample_ranges_[iteration];
-    const bool use_block_xnes = (num_iterations_ > 1);
+    const bool use_block_xnes = true;
 
 #pragma omp parallel if (max_threads_ > 1)
     {
@@ -238,26 +245,26 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
         {
             try
             {
-                Eigen::MatrixXd eps_sample(u_dim_, K_);
-                if (use_block_xnes)
+                const Eigen::MatrixXd &s_sample = latent_samples[n];
+                if (s_sample.rows() != u_dim_ || s_sample.cols() != K_ ||
+                    !s_sample.allFinite())
                 {
-                    // Whiten precomputed sample and map through learned block-diagonal factor A_blocks
-                    Eigen::MatrixXd s_white = inv_sqrt_cov.asDiagonal() * eps_samples[n];
-                    for (size_t b = 0; b < block_slices_.size(); ++b)
-                    {
-                        const int s_col = block_slices_[b].first;
-                        const int n_cols = block_slices_[b].second;
-                        const int dim_b = u_dim_ * n_cols;
-                        Eigen::MatrixXd s_blk = s_white.middleCols(s_col, n_cols);
-                        Eigen::VectorXd s_vec = Eigen::Map<const Eigen::VectorXd>(s_blk.data(), dim_b);
-                        Eigen::VectorXd d_vec = A_blocks[b] * s_vec;
-                        eps_sample.middleCols(s_col, n_cols) =
-                            Eigen::Map<const Eigen::MatrixXd>(d_vec.data(), u_dim_, n_cols);
-                    }
+                    throw std::runtime_error("Invalid precomputed IGO latent sample");
                 }
-                else
+
+                Eigen::MatrixXd eps_sample = Eigen::MatrixXd::Zero(u_dim_, K_);
+                for (size_t b = 0; b < block_slices_.size(); ++b)
                 {
-                    eps_sample = eps_samples[n];
+                    const int s_col = block_slices_[b].first;
+                    const int n_cols = block_slices_[b].second;
+                    const int dim_b = u_dim_ * n_cols;
+                    const Eigen::VectorXd s_vec =
+                        Eigen::Map<const Eigen::VectorXd>(
+                            s_sample.middleCols(s_col, n_cols).data(), dim_b);
+                    const Eigen::VectorXd d_vec = A_blocks[b] * s_vec;
+                    eps_sample.middleCols(s_col, n_cols) =
+                        Eigen::Map<const Eigen::MatrixXd>(
+                            d_vec.data(), u_dim_, n_cols);
                 }
 
                 Eigen::MatrixXd u_sample = control_input + eps_sample;
@@ -265,7 +272,8 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                 if (APPLY_INPUT_CONSTRAINTS)
                 {
                     applyInputConstraints(u_sample);
-                    eps_sample = u_sample - control_input;
+                    // The natural-gradient statistics remain in the original
+                    // whitened coordinates s, before projection.
                 }
 
                 if (use_block_xnes && enable_certificate_pruning_)
@@ -274,7 +282,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                         forwardRolloutWithCertificatePruning(u_sample, incumbent_best_cost);
                     if (pruned)
                     {
-                        eps[n] = std::move(eps_sample);
+                        standard_samples[n] = s_sample;
                         u_samples[n] = std::move(u_sample);
                         x[n] = std::move(x_sample);
                         y[n] = std::move(y_sample);
@@ -283,8 +291,8 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                         continue;
                     }
                     auto [total_cost, scalarized_cost] =
-                        calculateTotalSampleCost(x_sample, y_sample, eps_sample, correction_weights, cost_func);
-                    eps[n] = std::move(eps_sample);
+                        calculateSampleObjective(y_sample, u_sample, cost_func);
+                    standard_samples[n] = s_sample;
                     u_samples[n] = std::move(u_sample);
                     x[n] = std::move(x_sample);
                     y[n] = std::move(y_sample);
@@ -295,8 +303,8 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                 {
                     auto [x_sample, y_sample] = forwardRollout(u_sample);
                     auto [total_cost, scalarized_cost] =
-                        calculateTotalSampleCost(x_sample, y_sample, eps_sample, correction_weights, cost_func);
-                    eps[n] = std::move(eps_sample);
+                        calculateSampleObjective(y_sample, u_sample, cost_func);
+                    standard_samples[n] = s_sample;
                     u_samples[n] = std::move(u_sample);
                     x[n] = std::move(x_sample);
                     y[n] = std::move(y_sample);
@@ -317,7 +325,11 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     }
 
     // IGO Quantile Ranking & Block-Diagonal xNES Natural Gradient Update (Section V-B)
-    const int n_elite = std::max(2, static_cast<int>( std::round(elite_quantile_ * n_samples) ));
+    const int n_elite = std::max(
+        1,
+        std::min(
+            n_samples,
+            static_cast<int>(std::ceil(elite_quantile_ * static_cast<double>(n_samples)))));
     std::vector<int> indices(n_samples);
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(
@@ -345,11 +357,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     }
     else
     {
-        const double w_i = 1.0 / static_cast<double>(n_elite);
-        for (int idx : elite_indices)
-        {
-            control_input += w_i * eps[idx];
-        }
+        throw std::logic_error("FOM-IGO requires the block xNES update path");
     }
 
     int best_overall_sample_idx = indices[0];
@@ -358,21 +366,21 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
     return {control_input, x, u_samples[best_overall_sample_idx], best_overall_cost};
 }
 
-// Calculate cost
-std::tuple<double, uint64_t> MPPIPlanner::calculateTotalSampleCost(const Eigen::MatrixXd &x,
-                                                                   const Eigen::MatrixXd &y,
-                                                                   const Eigen::MatrixXd &eps,
-                                                                   const std::vector<Eigen::RowVectorXd> &correction_weights,
-                                                                   BaseCostFunction *cost_function) const
+// Evaluate the Lex-STL objective. IGO uses rank/quantile selection, so no
+// MPPI exponential temperature or importance-sampling correction is applied.
+std::tuple<double, uint64_t> MPPIPlanner::calculateSampleObjective(
+    const Eigen::MatrixXd &y,
+    const Eigen::MatrixXd &u,
+    BaseCostFunction *cost_function) const
 {
-    double input_cost = 0.0;
-    for (int k = 0; k < K_ - 1; ++k)
+    const uint64_t lex_cost = cost_function->evaluate(y);
+    double secondary_cost = 0.0;
+    if (K_ > 1)
     {
-        input_cost += (correction_weights[k] * eps.col(k)).sum();
+        // Only a tie-breaker: this can never override the Lex-STL key.
+        secondary_cost = 1e-6 * u.leftCols(K_ - 1).squaredNorm();
     }
-    uint64_t output_cost = cost_function->evaluate(y);
-
-    return {input_cost + static_cast<double>(output_cost), output_cost};
+    return {secondary_cost, lex_cost};
 }
 
 // Create a new cost function instance for thread-local use
@@ -396,7 +404,8 @@ void MPPIPlanner::initializeCostFunction(const Config &cfg)
 // Calculate remaining input cost
 double MPPIPlanner::calculateRemainingInputCost(const Eigen::MatrixXd &u) const
 {
-    Eigen::MatrixXd R_ = beta_schedule_.back() * initial_lambda_ * initial_covariance_.inverse();
+    // Reporting-only effort term; it is not part of IGO ranking.
+    Eigen::MatrixXd R_ = initial_lambda_ * initial_covariance_.inverse();
 
     double cost = 0.0;
     for (int k = 0; k < K_; ++k)
@@ -406,45 +415,45 @@ double MPPIPlanner::calculateRemainingInputCost(const Eigen::MatrixXd &u) const
     return cost;
 }
 
-// Precompute all eps samples and thread ranges for all iterations
+// Precompute whitened latent samples s ~ N(0,I) and thread ranges.
 void MPPIPlanner::precomputeSamples()
 {
-    precomputed_eps_.reserve(num_iterations_);
+    precomputed_standard_samples_.reserve(num_iterations_);
     thread_sample_ranges_.reserve(num_iterations_);
 
     for (int iteration = 0; iteration < num_iterations_; ++iteration)
     {
         int n_samples = sample_count_schedule_[iteration];
-        Eigen::MatrixXd sqrt_cov = covariance_schedule_[iteration].array().sqrt();
-
-        std::vector<Eigen::MatrixXd> eps_samples;
-        eps_samples.reserve(n_samples);
+        std::vector<Eigen::MatrixXd> standard_samples;
+        standard_samples.reserve(n_samples);
 
         if (sampling_method_ == "pureRandom")
         {
-            std::mt19937 gen(seed_);
+            std::mt19937 gen(seed_ + static_cast<unsigned int>(iteration));
             std::normal_distribution<double> dist(0.0, 1.0);
 
             for (int n = 0; n < n_samples; ++n)
             {
-                eps_samples.push_back(generateRandomSample(dist, gen, sqrt_cov));
+                standard_samples.push_back(generateStandardNormalSample(dist, gen));
             }
         }
         else if (sampling_method_ == "randomLHS" || sampling_method_ == "improvedLHS" || sampling_method_ == "maximinLHS")
         {
-            auto lhs_utility = std::make_unique<LHSDiagonal>(seed_);
+            auto lhs_utility = std::make_unique<LHSDiagonal>(
+                seed_ + static_cast<unsigned int>(iteration));
 
-            Eigen::MatrixXd lhs_batch = generateLHSSample(n_samples, sqrt_cov, lhs_utility.get());
+            Eigen::MatrixXd lhs_batch =
+                generateStandardLHSSample(n_samples, lhs_utility.get());
             for (int n = 0; n < n_samples; ++n)
             {
-                eps_samples.push_back(lhs_batch.row(n).reshaped(u_dim_, K_));
+                standard_samples.push_back(lhs_batch.row(n).reshaped(u_dim_, K_));
             }
         }
         else
         {
             throw std::runtime_error("Unknown sampling method: " + sampling_method_);
         }
-        precomputed_eps_.push_back(std::move(eps_samples));
+        precomputed_standard_samples_.push_back(std::move(standard_samples));
 
         std::vector<std::pair<int, int>> thread_ranges;
         thread_ranges.reserve(max_threads_);
@@ -462,28 +471,6 @@ std::pair<int, int> MPPIPlanner::calculateSampleRange(int thread_id, int n_sampl
     int end_idx = (n_samples * (thread_id + 1)) / n_threads;
 
     return {start_idx, end_idx};
-}
-
-double MPPIPlanner::calculateBeta(int iteration) const
-{
-    if (beta_decay_method_ == "classic")
-    {
-        return std::sqrt(std::pow(gamma_, iteration));
-    }
-    else if (beta_decay_method_ == "linear")
-    {
-        double ratio = static_cast<double>(iteration) / (num_iterations_ - 1);
-        return 1.0 - (1.0 - beta_min_) * ratio;
-    }
-    else if (beta_decay_method_ == "cosine")
-    {
-        double ratio = 0.5 * (1 - std::cos(M_PI * iteration / (num_iterations_ - 1)));
-        return 1.0 - (1.0 - beta_min_) * ratio;
-    }
-    else
-    {
-        throw std::runtime_error("Unknown beta decay method: " + beta_decay_method_);
-    }
 }
 
 int MPPIPlanner::calculateNumberOfSamples(int iteration) const
@@ -517,10 +504,11 @@ void MPPIPlanner::initializeParameterValues()
 
     for (int i = 0; i < num_iterations_; ++i)
     {
-        double beta = calculateBeta(i);
-        beta_schedule_.push_back(beta);
-        covariance_schedule_.push_back(beta * initial_covariance_);
-        lambda_schedule_.push_back(beta * beta * initial_lambda_);
+        // Compatibility-only schedule values. IGO keeps covariance in A and
+        // has no beta/temperature shrinkage.
+        beta_schedule_.push_back(1.0);
+        covariance_schedule_.push_back(initial_covariance_);
+        lambda_schedule_.push_back(initial_lambda_);
         sample_count_schedule_.push_back(calculateNumberOfSamples(i));
     }
 }
@@ -575,26 +563,25 @@ Eigen::MatrixXd MPPIPlanner::initializeControlInput(const Eigen::MatrixXd &u_ini
     return u;
 }
 
-Eigen::MatrixXd MPPIPlanner::generateRandomSample(std::normal_distribution<double> &distribution,
-                                                  std::mt19937 &generator,
-                                                  const Eigen::MatrixXd &sqrt_covariance) const
+Eigen::MatrixXd MPPIPlanner::generateStandardNormalSample(
+    std::normal_distribution<double> &distribution,
+    std::mt19937 &generator) const
 {
-    Eigen::MatrixXd eps(u_dim_, K_);
-
+    Eigen::MatrixXd sample(u_dim_, K_);
     for (int n = 0; n < u_dim_; ++n)
     {
         for (int k = 0; k < K_; ++k)
         {
-            eps(n, k) = distribution(generator) * sqrt_covariance(n, n);
+            sample(n, k) = distribution(generator);
         }
     }
-    return eps;
+    return sample;
 }
 
-Eigen::MatrixXd MPPIPlanner::generateLHSSample(int n_samples, const Eigen::MatrixXd &sqrt_covariance, LHSDiagonal *lhs_utility) const
+Eigen::MatrixXd MPPIPlanner::generateStandardLHSSample(
+    int n_samples, LHSDiagonal *lhs_utility) const
 {
     const int total_dims = u_dim_ * K_;
-
     Eigen::MatrixXd lhs_samples;
 
     if (sampling_method_ == "randomLHS")
@@ -609,15 +596,10 @@ Eigen::MatrixXd MPPIPlanner::generateLHSSample(int n_samples, const Eigen::Matri
     {
         lhs_samples = lhs_utility->maximinLHS(n_samples, total_dims);
     }
-
-    Eigen::MatrixXd normal_samples = LHSDiagonal::uniformToNormal(lhs_samples);
-
-    Eigen::VectorXd sqrt_var_u(u_dim_);
-    for (int u = 0; u < u_dim_; ++u)
+    else
     {
-        sqrt_var_u(u) = sqrt_covariance(u, u);
+        throw std::runtime_error("Unknown LHS sampling method: " + sampling_method_);
     }
-    Eigen::VectorXd stddev_vector = LHSDiagonal::createTimeSeriesStddevVector(sqrt_var_u, K_);
 
-    return LHSDiagonal::applyDiagonalScaling(normal_samples, stddev_vector);
+    return LHSDiagonal::uniformToNormal(lhs_samples);
 }

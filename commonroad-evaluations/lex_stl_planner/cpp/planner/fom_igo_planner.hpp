@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <Eigen/Dense>
+#include <unsupported/Eigen/MatrixFunctions>
 
 // FOM-IGO primal search utilities.
 //

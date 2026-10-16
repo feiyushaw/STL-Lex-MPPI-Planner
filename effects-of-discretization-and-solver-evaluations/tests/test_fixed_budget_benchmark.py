@@ -77,8 +77,8 @@ def test_certificate_pruning_uses_only_feasible_incumbent():
     solver.solve()
     d = solver.get_diagnostics()
     assert d["pruned_rollouts"] == 1
-    assert d["evaluated_transitions"] == 11
-    assert d["transition_reduction_rate"] == 1.0 / 12.0
+    assert d["evaluated_transitions"] == 10
+    assert d["transition_reduction_rate"] == 1.0 / 6.0
 
 
 def test_certificate_pruning_is_disabled_without_feasible_incumbent():

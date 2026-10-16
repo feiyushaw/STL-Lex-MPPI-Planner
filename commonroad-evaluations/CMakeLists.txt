@@ -59,7 +59,7 @@ if(BUILD_FOM_IGO_TESTS)
     )
     target_include_directories(fom_igo_block_updater_test PRIVATE
         ${CMAKE_SOURCE_DIR}/lex_stl_planner/cpp/planner
-        \${EIGEN3_INCLUDE_DIR}
+        ${EIGEN3_INCLUDE_DIR}
     )
     target_link_libraries(fom_igo_block_updater_test PRIVATE Eigen3::Eigen)
     add_test(NAME fom_igo_block_updater_test COMMAND fom_igo_block_updater_test)

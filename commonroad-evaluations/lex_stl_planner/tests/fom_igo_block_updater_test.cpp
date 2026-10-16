@@ -1,5 +1,7 @@
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <stdexcept>
 #include <vector>
 
@@ -9,11 +11,18 @@
 
 int main()
 {
+    const auto require = [](bool condition, const char *message) {
+        if (!condition) {
+            std::cerr << "FAIL: " << message << std::endl;
+            std::exit(1);
+        }
+    };
+
     const auto slices = FOMIGOBlockUpdater::buildBlockSlices(7, 3);
-    assert(slices.size() == 3);
-    assert(slices[0] == std::make_pair(0, 3));
-    assert(slices[1] == std::make_pair(3, 6));
-    assert(slices[2] == std::make_pair(6, 7));
+    require(slices.size() == 3, "three temporal blocks expected");
+    require(slices[0] == std::make_pair(0, 3), "first block mismatch");
+    require(slices[1] == std::make_pair(3, 6), "second block mismatch");
+    require(slices[2] == std::make_pair(6, 7), "last partial block mismatch");
 
     Eigen::MatrixXd mean = Eigen::MatrixXd::Zero(1, 4);
     std::vector<Eigen::MatrixXd> factors{
@@ -36,11 +45,11 @@ int main()
         1.0,
         0.25);
 
-    assert(mean(0, 0) < 0.0);
-    assert(factors[0].allFinite());
-    assert(factors[1].allFinite());
-    assert(std::abs(factors[0].determinant()) > 0.0);
-    assert(std::abs(factors[1].determinant()) > 0.0);
+    require(mean(0, 0) < 0.0, "elite samples should move the mean");
+    require(factors[0].allFinite(), "first covariance factor is finite");
+    require(factors[1].allFinite(), "second covariance factor is finite");
+    require(std::abs(factors[0].determinant()) > 0.0, "first covariance factor remains nonsingular");
+    require(std::abs(factors[1].determinant()) > 0.0, "second covariance factor remains nonsingular");
 
     bool threw = false;
     try
@@ -58,7 +67,7 @@ int main()
     {
         threw = true;
     }
-    assert(threw);
+    require(threw, "invalid elite index must be rejected");
 
     return 0;
 }

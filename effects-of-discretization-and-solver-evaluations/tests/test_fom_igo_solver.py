@@ -105,14 +105,14 @@ def test_legacy_mppi_name_points_to_igo_backend():
 
 
 def test_partial_block_update_uses_endpoint_width():
-    samples = np.zeros((1, 4, 1, 6), dtype=float)
+    samples = np.zeros((1, 4, 1, 7), dtype=float)
     samples[0, 0, 0, :] = -1.0
     samples[0, 1, 0, :] = -0.5
 
     solver = FOMIGOSolver(
         [DummyCost(time=2)],
         x0=0.0,
-        K=7,
+        K=8,
         system=DummySystem(),
         n_iterations=1,
         n_samples_constant=4,
@@ -128,10 +128,10 @@ def test_partial_block_update_uses_endpoint_width():
     )
 
     u, A_blocks, _, _, _, _ = solver.fom_igo_step(
-        0, np.zeros((1, 7)), solver._init_block_factors(), 4
+        0, np.zeros((1, 8)), solver._init_block_factors(), 4
     )
 
     assert [a.shape for a in A_blocks] == [(3, 3), (3, 3), (1, 1)]
     assert np.all(np.isfinite(u))
-    assert u.shape == (1, 7)
+    assert u.shape == (1, 8)
     assert u[0, -1] == 0.0

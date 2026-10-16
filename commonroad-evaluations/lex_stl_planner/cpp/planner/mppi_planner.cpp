@@ -44,6 +44,33 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     }
     omp_set_num_threads(max_threads_);
 
+    if (num_iterations_ < 0)
+    {
+        throw std::invalid_argument("IGO num_iterations must be non-negative");
+    }
+    if (n_samples_initial_ <= 0)
+    {
+        throw std::invalid_argument("IGO n_samples_initial must be positive");
+    }
+    if (n_samples_final_ <= 0)
+    {
+        throw std::invalid_argument("IGO n_samples_final must be positive");
+    }
+    if (u_dim_ <= 0 || K_ <= 1)
+    {
+        throw std::invalid_argument("IGO requires positive input dimension and horizon");
+    }
+    if (initial_covariance_.rows() != u_dim_ ||
+        initial_covariance_.cols() != u_dim_ ||
+        !initial_covariance_.allFinite())
+    {
+        throw std::invalid_argument("IGO initial covariance has invalid dimensions or values");
+    }
+    if ((initial_covariance_.diagonal().array() <= 0.0).any())
+    {
+        throw std::invalid_argument("IGO initial covariance must be positive definite on the diagonal");
+    }
+
     // Compute bit weight of highest-priority rule (OPERATIONAL_LIMITS) for Corollary 1 prefix pruning
     int total_bits = 0;
     std::vector<int> rule_bits;
@@ -53,6 +80,10 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
         int b = static_cast<int>(std::ceil(std::log2(n_int + 1)));
         rule_bits.push_back(b);
         total_bits += b;
+    }
+    if (total_bits >= 64)
+    {
+        throw std::invalid_argument("Lexicographic rule encoding exceeds uint64 capacity");
     }
     if (!rule_bits.empty() && !cfg.rules.rulebook_order.empty() && cfg.rules.rulebook_order[0] == OPERATIONAL_LIMITS)
     {

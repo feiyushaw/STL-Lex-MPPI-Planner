@@ -36,6 +36,9 @@ def instantiate_planner(planner_type: str, cfg, scenario):
 
     # Instantiate planner based on selection
     planner_configs = {
+        # "igo" is the canonical optimizer name. The "mppi" entry is retained
+        # only as a compatibility alias for existing experiment scripts.
+        "igo": MPPIPlanner,
         "mppi": MPPIPlanner,
         "preemptive_mppi": PreemptiveMPPIPlanner,
         "random_shooting": RandomShootingPlanner,

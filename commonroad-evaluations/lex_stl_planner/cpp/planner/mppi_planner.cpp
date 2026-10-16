@@ -135,6 +135,15 @@ std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> MPPIPlanner::forwar
             const double v_next = x(3, k + 1);
             if (v_next < v_min - 1e-4 || v_next > v_max + 1e-4 || delta_next < delta_min - 1e-4 || delta_next > delta_max + 1e-4)
             {
+                // Complete the state/output trajectory after the certificate
+                // decision so pruned samples remain structurally valid for
+                // visualization and diagnostics.
+                for (int rem_k = k + 1; rem_k < K_ - 1; ++rem_k)
+                {
+                    x.col(rem_k + 1) = system_.f(x.col(rem_k), control_input.col(rem_k));
+                    y.col(rem_k) = system_.g(x.col(rem_k), control_input.col(rem_k));
+                }
+                y.col(K_ - 1) = system_.g(x.col(K_ - 1), control_input.col(K_ - 1));
                 return {true, x, y, op_limits_weight_ + static_cast<uint64_t>(K_ - k)};
             }
         }
@@ -153,7 +162,7 @@ PlannerResult MPPIPlanner::planImpl(const Eigen::MatrixXd &u_init)
     trajectory_samples.reserve(num_iterations_);
 
     Eigen::MatrixXd best_overall_sample = u;
-    auto [initial_x, initial_y] = forwardRollout(u);
+    Eigen::MatrixXd initial_y = forwardRollout(u).second;
     BaseCostFunction *initial_cost_func = thread_local_cost_functions_[0].get();
     uint64_t best_overall_cost = initial_cost_func->evaluate(initial_y);
 

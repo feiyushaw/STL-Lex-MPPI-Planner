@@ -83,6 +83,7 @@ class FOMIGOSolver:
         self.u_dim = int(self.sys.m)
         self.x_dim = int(self.sys.n)
         self.y_dim = int(self.sys.p)
+        self.control_horizon = self.K - 1
 
         if not (0.0 < self.elite_quantile <= 1.0):
             raise ValueError("elite_quantile must be in (0, 1]")
@@ -108,8 +109,8 @@ class FOMIGOSolver:
         self.power_sums = self.precompute_power_sums()
 
         self.blocks = [
-            (s, min(self.K, s + self.block_steps))
-            for s in range(0, self.K, self.block_steps)
+            (s, min(self.control_horizon, s + self.block_steps))
+            for s in range(0, self.control_horizon, self.block_steps)
         ]
 
         self._rules_by_time = {}
@@ -232,9 +233,9 @@ class FOMIGOSolver:
         arr = np.asarray(self.pregenerated_eps, dtype=np.float64)
         if arr.ndim != 4:
             raise ValueError(
-                "pregenerated_eps must have shape [iteration, sample, u_dim, K]"
+                "pregenerated_eps must have shape [iteration, sample, u_dim, K-1]"
             )
-        if arr.shape[2:] != (self.u_dim, self.K):
+        if arr.shape[2:] != (self.u_dim, self.control_horizon):
             raise ValueError(
                 "pregenerated_eps shape does not match [*, u_dim, K]"
             )
@@ -254,7 +255,7 @@ class FOMIGOSolver:
                 )
             return self.pregenerated_eps[iteration_idx, :n_samples].copy()
 
-        s = self._rng.standard_normal((n_samples, self.u_dim, self.K))
+        s = self._rng.standard_normal((n_samples, self.u_dim, self.control_horizon))
         half = n_samples // 2
         if half > 0:
             s[:half] = self._rng.standard_normal((half, self.u_dim, self.K))

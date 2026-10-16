@@ -57,18 +57,21 @@ From effects-of-discretization-and-solver-evaluations:
 
 This uses 20 iterations x 500 samples = 10,000 rollouts per run.
 
-## Publication-scale run
+## Recommended stochastic study
 
-The FOM paper reports 50 random seeds and 10,000 rollouts per iteration.
-For a comparable stochastic study, increase the benchmark budget explicitly,
-for example:
+For a practical repository-level study, start with:
 
-    python benchmark_fixed_budget.py --scenarios 100 --seeds 50 --samples 10000
+    python benchmark_fixed_budget.py --scenarios 20 --seeds 10 --iterations 20 --samples 500
 
-The repository benchmark is not a reproduction of the paper's unicycle
-obstacle benchmark. The paper uses a constant-speed unicycle, a 900-step
-horizon, independently constructed semi-Lagrangian certificates, and four FOM
-variants plus AL-DDP. This repository study instead evaluates the specific
+This gives 10,000 rollouts per method and scenario/seed, while keeping the
+study manageable. Increase the number of scenarios or seeds only after the
+smoke run is stable.
+
+The FOM paper reports 50 random seeds and 10,000 rollouts per iteration for its
+single constant-speed-unicycle benchmark. Those settings should not be copied
+blindly to this repository: multiplying them by many scenarios would create a
+very large evaluation budget. The repository benchmark is not a reproduction
+of the paper's unicycle obstacle benchmark. It instead evaluates the specific
 engineering question of replacing the existing Lex-STL MPPI backend.
 
 Reference: arXiv:2603.16231v3, Sections V-A and V-B.

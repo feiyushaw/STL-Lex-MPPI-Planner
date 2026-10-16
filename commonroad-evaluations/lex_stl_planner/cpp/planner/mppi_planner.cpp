@@ -60,6 +60,7 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     {
         throw std::invalid_argument("IGO requires positive input dimension and horizon");
     }
+    control_horizon_ = K_ - 1;
     if (initial_covariance_.rows() != u_dim_ ||
         initial_covariance_.cols() != u_dim_ ||
         !initial_covariance_.allFinite() ||
@@ -108,7 +109,7 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
         throw std::invalid_argument("Invalid FOM-IGO configuration");
     }
 
-    block_slices_ = FOMIGOBlockUpdater::buildBlockSlices(K_, block_steps_);
+    block_slices_ = FOMIGOBlockUpdater::buildBlockSlices(control_horizon_, block_steps_);
 
     initializeParameterValues();
     precomputeSamples();
@@ -291,7 +292,7 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
             try
             {
                 const Eigen::MatrixXd &s_sample = latent_samples[n];
-                if (s_sample.rows() != u_dim_ || s_sample.cols() != K_ ||
+                if (s_sample.rows() != u_dim_ || s_sample.cols() != control_horizon_ ||
                     !s_sample.allFinite())
                 {
                     throw std::runtime_error("Invalid precomputed IGO latent sample");
@@ -446,7 +447,7 @@ double MPPIPlanner::calculateRemainingInputCost(const Eigen::MatrixXd &u) const
     Eigen::MatrixXd R_ = initial_lambda_ * initial_covariance_.inverse();
 
     double cost = 0.0;
-    for (int k = 0; k < K_; ++k)
+    for (int k = 0; k < control_horizon_; ++k)
     {
         cost += 0.5 * u.col(k).transpose() * R_ * u.col(k);
     }
@@ -615,7 +616,7 @@ Eigen::MatrixXd MPPIPlanner::generateStandardNormalSample(
     std::normal_distribution<double> &distribution,
     std::mt19937 &generator) const
 {
-    Eigen::MatrixXd sample(u_dim_, K_);
+    Eigen::MatrixXd sample(u_dim_, control_horizon_);
     for (int n = 0; n < u_dim_; ++n)
     {
         for (int k = 0; k < K_; ++k)
@@ -629,7 +630,7 @@ Eigen::MatrixXd MPPIPlanner::generateStandardNormalSample(
 Eigen::MatrixXd MPPIPlanner::generateStandardLHSSample(
     int n_samples, LHSDiagonal *lhs_utility) const
 {
-    const int total_dims = u_dim_ * K_;
+    const int total_dims = u_dim_ * control_horizon_;
     Eigen::MatrixXd lhs_samples;
 
     if (sampling_method_ == "randomLHS")

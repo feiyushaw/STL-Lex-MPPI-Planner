@@ -67,8 +67,10 @@ def run_case(shifts, scenario_id, seed, args):
             "total_rollouts": diag["total_rollouts"],
             "pruned_rollouts": diag["pruned_rollouts"],
             "evaluated_transitions": diag["evaluated_transitions"],
+            "pruned_transitions": diag["pruned_transitions"],
             "rollout_effective_rate": diag["rollout_effective_rate"],
             "transition_effective_rate": diag["transition_effective_rate"],
+            "transition_reduction_rate": diag["transition_reduction_rate"],
             "optimal_match": int(result[9]) == int(optimum),
         })
 
@@ -81,8 +83,10 @@ def run_case(shifts, scenario_id, seed, args):
         "total_rollouts": mppi_result["total_rollouts"],
         "pruned_rollouts": 0,
         "evaluated_transitions": mppi_result["evaluated_transitions"],
+        "pruned_transitions": 0,
         "rollout_effective_rate": 1.0,
         "transition_effective_rate": 1.0,
+        "transition_reduction_rate": 0.0,
         "optimal_match": mppi_result["best_cost"] == int(optimum),
     })
     return rows
@@ -105,6 +109,7 @@ def summarize(df):
             "mean_solve_time_sec": g["solve_time_sec"].mean(),
             "mean_rollout_effective_rate": g["rollout_effective_rate"].mean(),
             "mean_transition_effective_rate": g["transition_effective_rate"].mean(),
+            "mean_transition_reduction_rate": g["transition_reduction_rate"].mean(),
         })
     return pd.DataFrame(out)
 

@@ -62,9 +62,10 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     }
     if (initial_covariance_.rows() != u_dim_ ||
         initial_covariance_.cols() != u_dim_ ||
-        !initial_covariance_.allFinite())
+        !initial_covariance_.allFinite() ||
+        !initial_covariance_.isDiagonal())
     {
-        throw std::invalid_argument("IGO initial covariance has invalid dimensions or values");
+        throw std::invalid_argument("IGO initial covariance must be finite, square, and diagonal");
     }
     if ((initial_covariance_.diagonal().array() <= 0.0).any())
     {
@@ -77,6 +78,10 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     for (const auto &r : cfg.rules.rulebook_order)
     {
         int n_int = cfg.rules.rule_discretization.at(r).n_intervals;
+        if (n_int <= 0)
+        {
+            throw std::invalid_argument("Rule discretization must contain a positive interval count");
+        }
         int b = static_cast<int>(std::ceil(std::log2(n_int + 1)));
         rule_bits.push_back(b);
         total_bits += b;

@@ -246,7 +246,7 @@ class FOMIGOSolver:
             )
         if arr.shape[2:] != (self.u_dim, self.control_horizon):
             raise ValueError(
-                "pregenerated_eps shape does not match [*, u_dim, K]"
+                "pregenerated_eps shape does not match [*, u_dim, K-1]"
             )
         if not np.all(np.isfinite(arr)):
             raise ValueError("pregenerated_eps contains non-finite values")
@@ -267,7 +267,7 @@ class FOMIGOSolver:
         s = self._rng.standard_normal((n_samples, self.u_dim, self.control_horizon))
         half = n_samples // 2
         if half > 0:
-            s[:half] = self._rng.standard_normal((half, self.u_dim, self.K))
+            s[:half] = self._rng.standard_normal((half, self.u_dim, self.control_horizon))
             s[half:2 * half] = -s[:half]
         return s
 
@@ -347,7 +347,7 @@ class FOMIGOSolver:
 
         s_samples = self._latent_samples(iteration_idx, n_samples)
 
-        eps = np.empty_like(s_samples)
+        eps = np.zeros((n_samples, self.u_dim, self.K), dtype=np.float64)
         for (s_idx, e_idx), A_b in zip(self.blocks, A_blocks):
             dim_b = (e_idx - s_idx) * self.u_dim
             s_slice = s_samples[:, :, s_idx:e_idx].reshape(n_samples, dim_b)

@@ -485,7 +485,7 @@ void MPPIPlanner::precomputeSamples()
                 generateStandardLHSSample(n_samples, lhs_utility.get());
             for (int n = 0; n < n_samples; ++n)
             {
-                standard_samples.push_back(lhs_batch.row(n).reshaped(u_dim_, K_));
+                standard_samples.push_back(lhs_batch.row(n).reshaped(u_dim_, control_horizon_));
             }
         }
         else
@@ -619,7 +619,7 @@ Eigen::MatrixXd MPPIPlanner::generateStandardNormalSample(
     Eigen::MatrixXd sample(u_dim_, control_horizon_);
     for (int n = 0; n < u_dim_; ++n)
     {
-        for (int k = 0; k < K_; ++k)
+        for (int k = 0; k < control_horizon_; ++k)
         {
             sample(n, k) = distribution(generator);
         }

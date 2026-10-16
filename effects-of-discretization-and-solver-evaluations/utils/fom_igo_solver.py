@@ -1,20 +1,27 @@
 """
-FOM Certificate-Guided Block-Diagonal xNES (IGO) Solver for STL-Lex-MPPI-Planner.
-Drop-in replacement for `utils/mppi_solver.py` based on:
-Wei et al., "Featurized Occupation Measures for Structured Global Search in Numerical Optimal Control" (arXiv:2603.16231v3).
+FOM-IGO solver for STL-Lex-MPPI-Planner.
+
+The historical MPPISolver interface is retained for compatibility, but the
+active optimizer is IGO/xNES:
+
+    u = m + A s,  s ~ N(0,I)
+    rank/quantile selection
+    m <- m + eta_m A E_elite[s]
+    A_b <- A_b exp(eta_A/2 E_elite[s_b s_b^T - I])
+
+No MPPI exponential temperature weighting or MPPI perturbation correction is
+used by the optimizer.
 """
 
 import math
 import time
+
 import numpy as np
 from scipy.linalg import expm
 
 
 class FOMIGOSolver:
-    """
-    Implicit FOM with Block-Diagonal xNES natural gradient updates (Section V-B)
-    and Corollary 1 + Proposition 4 cumulative lower-bound prefix pruning (Section III-B).
-    """
+    """Implicit-FOM IGO solver with block-diagonal xNES search."""
 
     def __init__(
         self,
@@ -36,57 +43,75 @@ class FOMIGOSolver:
         random_seed=None,
         verbose: bool = True,
         pregenerated_eps=None,
-        elite_quantile: float = 0.08,
-        block_steps: int = 3,
+        elite_quantile: float = 0.05,
+        block_steps: int = 5,
         lr_mean: float = 1.0,
-        lr_cov: float = 0.30,
+        lr_cov: float = 0.25,
         enable_certificate_pruning: bool = True,
     ):
         self.cost_functions = cost_functions
-        self.x0 = x0
-        self.K = K
+        self.x0 = float(x0)
+        self.K = int(K)
         self.sys = system
 
-        # Standard MPPI-compatible parameters
-        self.n_iterations = n_iterations
-        self.n_samples_constant = n_samples_constant
-        self.n_samples_cosine = n_samples_cosine
-        self.n_samples_cosine_min = n_samples_cosine_min
-        self.cov = cov if getattr(cov, "size", 0) > 0 else np.array([[0.5]])
+        # Legacy constructor parameters are accepted for compatibility only.
+        self.n_iterations = int(n_iterations)
+        self.n_samples_constant = int(n_samples_constant)
+        self.n_samples_cosine = int(n_samples_cosine)
+        self.n_samples_cosine_min = int(n_samples_cosine_min)
+        self.cov = (
+            np.asarray(cov, dtype=np.float64)
+            if getattr(cov, "size", 0) > 0
+            else np.array([[0.5]], dtype=np.float64)
+        )
         self.lamb = lamb
         self.gamma = gamma
         self.beta_shrinking_method = beta_shrinking_method
         self.beta_min = beta_min
         self.samples_shrinking_method = samples_shrinking_method
-        self.input_clipping = input_clipping
+        self.input_clipping = bool(input_clipping)
         self.random_seed = random_seed
         self.verbose = verbose
         self.pregenerated_eps = pregenerated_eps
 
-        # FOM-IGO (Block-xNES + Certificate Pruning) hyperparameters
-        self.elite_quantile = elite_quantile
-        self.block_steps = block_steps
-        self.lr_mean = lr_mean
-        self.lr_cov = lr_cov
-        self.enable_certificate_pruning = enable_certificate_pruning
+        self.elite_quantile = float(elite_quantile)
+        self.block_steps = int(block_steps)
+        self.lr_mean = float(lr_mean)
+        self.lr_cov = float(lr_cov)
+        self.enable_certificate_pruning = bool(enable_certificate_pruning)
 
-        if self.random_seed is not None:
-            np.random.seed(random_seed)
+        self.u_dim = int(self.sys.m)
+        self.x_dim = int(self.sys.n)
+        self.y_dim = int(self.sys.p)
+
+        if not (0.0 < self.elite_quantile <= 1.0):
+            raise ValueError("elite_quantile must be in (0, 1]")
+        if self.block_steps <= 0:
+            raise ValueError("block_steps must be positive")
+        if self.lr_mean < 0.0 or self.lr_cov < 0.0:
+            raise ValueError("IGO learning rates must be non-negative")
+        if self.cov.ndim != 2 or self.cov.shape != (self.u_dim, self.u_dim):
+            raise ValueError("covariance must be square and match the input dimension")
+        if not np.allclose(self.cov, np.diag(np.diag(self.cov))):
+            raise ValueError("IGO requires a diagonal initial covariance")
+        if np.any(np.diag(self.cov) <= 0.0):
+            raise ValueError("initial covariance must be positive")
+
+        self._rng = (
+            np.random.default_rng()
+            if random_seed is None
+            else np.random.default_rng(random_seed)
+        )
 
         self.best_overall_lex_cost = float("inf")
-        self.best_overall_u = np.zeros((self.sys.m, self.K))
-
-        # Precompute bit-shifted lexicographical weights
+        self.best_overall_u = None
         self.power_sums = self.precompute_power_sums()
 
-        # Partition control horizon K into block-diagonal slices
-        self.u_dim = self.sys.m
         self.blocks = [
             (s, min(self.K, s + self.block_steps))
             for s in range(0, self.K, self.block_steps)
         ]
 
-        # Pre-index cost functions by time step for step-wise prefix pruning
         self._rules_by_time = {}
         self._rule_bounds = []
         for r_idx, cf in enumerate(self.cost_functions):
@@ -100,236 +125,292 @@ class FOMIGOSolver:
 
         self._pruned_steps_total = 0
         self._evaluated_steps_total = 0
+        self._validate_pregenerated_samples()
 
         if self.verbose and self.n_iterations > 0:
             self.print_total_samples_planned()
 
     def print_total_samples_planned(self):
-        total_planned_samples = sum(
-            self.calculate_number_of_samples(i) for i in range(self.n_iterations)
+        total = sum(
+            self.calculate_number_of_samples(i)
+            for i in range(self.n_iterations)
         )
-        print(f"Total planned samples (FOM-IGO): {total_planned_samples}")
+        print(f"Total planned samples (FOM-IGO): {total}")
 
     def precompute_power_sums(self):
         bits = [math.ceil(math.log2(c.nof_intervals + 1)) for c in self.cost_functions]
-        return [1 << int(sum(bits[i + 1 :])) for i in range(len(bits))]
+        return [1 << int(sum(bits[i + 1:])) for i in range(len(bits))]
 
     def calculate_beta(self, iteration):
-        if self.beta_shrinking_method == "exponential":
-            return math.sqrt(self.gamma**iteration)
-        elif self.beta_shrinking_method == "cosine":
-            if self.n_iterations <= 1:
-                return self.beta_min
-            ratio = 0.5 * (1 - math.cos(math.pi * iteration / (self.n_iterations - 1)))
-            return 1.0 - (1.0 - self.beta_min) * ratio
-        else:
-            raise ValueError(
-                f"Unknown beta shrinking method: {self.beta_shrinking_method}"
-            )
+        # Compatibility-only API. IGO carries covariance in A and has no beta schedule.
+        return 1.0
 
     def calculate_number_of_samples(self, iteration):
         if self.samples_shrinking_method == "constant":
             return self.n_samples_constant
-        elif self.samples_shrinking_method == "cosine":
+        if self.samples_shrinking_method == "cosine":
             if self.n_iterations <= 1:
                 return self.n_samples_cosine
-            ratio = 0.5 * (1 - math.cos(math.pi * iteration / (self.n_iterations - 1)))
+            ratio = 0.5 * (
+                1.0 - math.cos(math.pi * iteration / (self.n_iterations - 1))
+            )
             return round(
                 self.n_samples_cosine
                 - (self.n_samples_cosine - self.n_samples_cosine_min) * ratio
             )
-        else:
-            raise ValueError(
-                f"Unknown samples shrinking method: {self.samples_shrinking_method}"
+        if self.samples_shrinking_method == "linear":
+            if self.n_iterations <= 1:
+                return self.n_samples_cosine
+            ratio = iteration / (self.n_iterations - 1)
+            return round(
+                self.n_samples_cosine
+                - (self.n_samples_cosine - self.n_samples_cosine_min) * ratio
             )
+        raise ValueError(
+            f"Unknown samples shrinking method: {self.samples_shrinking_method}"
+        )
 
     def _init_block_factors(self):
-        init_std = np.sqrt(np.diag(self.cov)) if self.cov.ndim == 2 else np.sqrt(self.cov)
-        base_std = float(init_std[0]) if np.size(init_std) > 0 else 1.0
+        std = np.sqrt(np.diag(self.cov))
         A_blocks = []
         for s, e in self.blocks:
             dim_b = (e - s) * self.u_dim
-            A_blocks.append(np.eye(dim_b, dtype=np.float64) * base_std)
+            A_b = np.zeros((dim_b, dim_b), dtype=np.float64)
+            for k in range(e - s):
+                for d in range(self.u_dim):
+                    A_b[k * self.u_dim + d, k * self.u_dim + d] = std[d]
+            A_blocks.append(A_b)
         return A_blocks
 
     @staticmethod
-    def _vectorized_interval_index(
-        x_vals: np.ndarray, iv_lows: np.ndarray, iv_highs: np.ndarray
-    ) -> np.ndarray:
-        """Vectorized evaluation of CostFunction.evaluate_trajectory on 1D array x_vals."""
-        in_iv = (x_vals[:, None] >= iv_lows[None, :]) & (x_vals[:, None] <= iv_highs[None, :])
-        return np.argmax(in_iv, axis=1).astype(np.float64)
+    def _vectorized_interval_index(x_vals, iv_lows, iv_highs):
+        x_vals = np.asarray(x_vals, dtype=np.float64)
+        in_iv = (
+            (x_vals[:, None] >= iv_lows[None, :])
+            & (x_vals[:, None] <= iv_highs[None, :])
+        )
+        found = np.any(in_iv, axis=1)
+        result = np.argmax(in_iv, axis=1).astype(np.float64)
+        if np.any(~found):
+            # Never turn an out-of-range state into the best (zero-violation) bin.
+            result[~found] = float(len(iv_lows) - 1)
+        return result
 
-    def _evaluate_future_certificate(self, k_step: int, x_curr: np.ndarray) -> np.ndarray:
+    def _evaluate_future_certificate(self, k_step, x_curr):
         """
-        Analytical HJB reachability subsolution certificate v_psi(k, x_k) (Corollary 1 & Proposition 4).
-        Computes guaranteed minimum future lexicographic violation over reachable cone [x_k + dt*u_min, x_k + dt*u_max].
+        Conservative lower bound for the 1D pointwise-rule benchmark.
+
+        For x[k+1] = x[k] + dt*u[k], u in [u_min,u_max], a positive rule is
+        minimized at the lower reachable endpoint and a negative rule at the
+        upper endpoint. The result is a lower bound for the additive rule
+        penalties used by this synthetic evaluator.
         """
-        v_cert = np.zeros_like(x_curr, dtype=np.float64)
-        dt = self.sys.dt
-        u_min = self.sys.u_min
-        u_max = self.sys.u_max
+        x_curr = np.asarray(x_curr, dtype=np.float64)
+        v_cert = np.zeros_like(x_curr)
+        dt = float(self.sys.dt)
 
         for t_step, direction, lb, ub, iv_lows, iv_highs, p_weight in self._rule_bounds:
             if t_step <= k_step:
                 continue
             rem_steps = t_step - k_step
             if direction == "pos":
-                x_best_reach = x_curr + rem_steps * dt * u_min
-                viol_mask = x_best_reach > lb
-                if np.any(viol_mask):
-                    v_cert[viol_mask] += (
-                        self._vectorized_interval_index(x_best_reach[viol_mask], iv_lows, iv_highs)
-                        * p_weight
-                    )
+                x_best = x_curr + rem_steps * dt * self.sys.u_min
+                mask = x_best > lb
             else:
-                x_best_reach = x_curr + rem_steps * dt * u_max
-                viol_mask = x_best_reach < ub
-                if np.any(viol_mask):
-                    v_cert[viol_mask] += (
-                        self._vectorized_interval_index(x_best_reach[viol_mask], iv_lows, iv_highs)
-                        * p_weight
-                    )
+                x_best = x_curr + rem_steps * dt * self.sys.u_max
+                mask = x_best < ub
+            if np.any(mask):
+                idx = self._vectorized_interval_index(
+                    x_best[mask], iv_lows, iv_highs
+                )
+                v_cert[mask] += idx * p_weight
         return v_cert
 
-    def solve(self):
-        record_y_opt, record_y, record_best_sample_idx, record_cost = [], [], [], []
-        record_beta, record_n_samples = [], []
+    def _validate_pregenerated_samples(self):
+        if self.pregenerated_eps is None:
+            return
+        arr = np.asarray(self.pregenerated_eps, dtype=np.float64)
+        if arr.ndim != 4:
+            raise ValueError(
+                "pregenerated_eps must have shape [iteration, sample, u_dim, K]"
+            )
+        if arr.shape[2:] != (self.u_dim, self.K):
+            raise ValueError(
+                "pregenerated_eps shape does not match [*, u_dim, K]"
+            )
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("pregenerated_eps contains non-finite values")
+        self.pregenerated_eps = arr
 
-        u = np.zeros((self.sys.m, self.K), dtype=np.float64)
+    def _latent_samples(self, iteration_idx, n_samples):
+        if self.pregenerated_eps is not None:
+            if iteration_idx >= self.pregenerated_eps.shape[0]:
+                raise ValueError(
+                    "pregenerated_eps has fewer iterations than requested"
+                )
+            if self.pregenerated_eps.shape[1] < n_samples:
+                raise ValueError(
+                    "pregenerated_eps has fewer samples than requested"
+                )
+            return self.pregenerated_eps[iteration_idx, :n_samples].copy()
+
+        s = self._rng.standard_normal((n_samples, self.u_dim, self.K))
+        half = n_samples // 2
+        if half > 0:
+            s[:half] = self._rng.standard_normal((half, self.u_dim, self.K))
+            s[half:2 * half] = -s[:half]
+        return s
+
+    def solve(self):
+        record_y_opt = []
+        record_y = []
+        record_best_sample_idx = []
+        record_cost = []
+        record_beta = []
+        record_n_samples = []
+
+        u = np.zeros((self.u_dim, self.K), dtype=np.float64)
         A_blocks = self._init_block_factors()
+
+        _, initial_y = self.forward_rollout(u)
+        self.best_overall_u = u.copy()
+        self.best_overall_lex_cost = float(self.evaluate(initial_y))
 
         t_start = time.time()
 
         for i in range(self.n_iterations):
             if self.verbose:
                 print(
-                    f"Iteration: {i + 1}/{self.n_iterations} (FOM-IGO) ----------------------------"
+                    f"Iteration: {i + 1}/{self.n_iterations} "
+                    f"(FOM-IGO) ----------------------------"
                 )
 
-            beta = self.calculate_beta(i)
-            n_samples_current = self.calculate_number_of_samples(i)
-            cov = beta * self.cov
-            lamb = beta**2 * self.lamb
+            n_samples = self.calculate_number_of_samples(i)
+            (
+                u,
+                A_blocks,
+                y_opt,
+                y,
+                best_idx,
+                cost,
+            ) = self.fom_igo_step(i, u, A_blocks, n_samples)
 
-            u, A_blocks, y_opt, y, best_sample_idx, cost = self.fom_igo_step(
-                i, u, A_blocks, beta, cov, lamb, n_samples_current
-            )
-
-            record_n_samples.append(n_samples_current)
-            record_beta.append(beta)
+            record_n_samples.append(n_samples)
+            record_beta.append(1.0)
             record_y_opt.append(y_opt)
             record_y.append(y)
-            record_best_sample_idx.append(best_sample_idx)
+            record_best_sample_idx.append(best_idx)
             record_cost.append(cost)
 
         solve_time = time.time() - t_start
 
-        if self.best_overall_u is None:
-            self.best_overall_u = u.copy()
-
-        best_overall_x, _ = self.forward_rollout(self.best_overall_u)
-
         final_u = u
         final_x, final_y = self.forward_rollout(final_u)
-        cost = self.evaluate(final_y)
-        if self.best_overall_lex_cost < cost:
+        final_cost = self.evaluate(final_y)
+
+        if (
+            self.best_overall_u is not None
+            and self.best_overall_lex_cost < final_cost
+        ):
             final_u = self.best_overall_u.copy()
-            final_x, final_y = best_overall_x, best_overall_x
-            cost = self.best_overall_lex_cost
+            final_x, final_y = self.forward_rollout(final_u)
+            final_cost = self.evaluate(final_y)
 
         return (
             final_x,
             final_u,
-            cost,
+            final_cost,
             solve_time,
             record_y_opt,
             record_y,
             record_best_sample_idx,
             record_cost,
-            best_overall_x,
+            self.forward_rollout(self.best_overall_u)[0],
             self.best_overall_lex_cost,
             record_n_samples,
             record_beta,
         )
 
-    def fom_igo_step(self, iteration_idx, u, A_blocks, beta, cov, lamb, n_samples):
-        x_dim = self.sys.n
-        y_dim = self.sys.p
-        u_dim = self.sys.m
+    def fom_igo_step(self, iteration_idx, u, A_blocks, n_samples):
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive")
 
-        # 1. Generate whitened standard normal innovations s ~ N(0, I)
-        if self.pregenerated_eps is not None:
-            scale = math.sqrt(max(beta * float(self.cov[0, 0]), 1e-12))
-            s_samples = self.pregenerated_eps[iteration_idx, :n_samples, :, :] / scale
-        else:
-            half_n = n_samples // 2
-            s_half = np.random.standard_normal((half_n, u_dim, self.K))
-            s_samples = np.concatenate([s_half, -s_half], axis=0)
-            if s_samples.shape[0] < n_samples:
-                s_extra = np.random.standard_normal(
-                    (n_samples - s_samples.shape[0], u_dim, self.K)
-                )
-                s_samples = np.concatenate([s_samples, s_extra], axis=0)
+        s_samples = self._latent_samples(iteration_idx, n_samples)
 
-        # 2. Map whitened samples through block-diagonal covariance factors A_blocks
         eps = np.empty_like(s_samples)
         for (s_idx, e_idx), A_b in zip(self.blocks, A_blocks):
-            dim_b = (e_idx - s_idx) * u_dim
+            dim_b = (e_idx - s_idx) * self.u_dim
             s_slice = s_samples[:, :, s_idx:e_idx].reshape(n_samples, dim_b)
-            eps_slice = s_slice @ A_b.T
-            eps[:, :, s_idx:e_idx] = eps_slice.reshape(n_samples, u_dim, e_idx - s_idx)
+            eps[:, :, s_idx:e_idx] = (
+                s_slice @ A_b.T
+            ).reshape(n_samples, self.u_dim, e_idx - s_idx)
 
         u_samples = u[None, :, :] + eps
         if self.input_clipping:
-            u_samples = np.clip(u_samples, self.sys.u_min, self.sys.u_max)
-            eps = u_samples - u[None, :, :]
+            u_samples = np.clip(
+                u_samples, self.sys.u_min, self.sys.u_max
+            )
 
-        # 3. Step-wise rollout with Corollary 1 + Proposition 4 lower-bound certificate pruning
-        x = np.zeros((n_samples, x_dim, self.K), dtype=np.float64)
+        x = np.zeros((n_samples, self.x_dim, self.K), dtype=np.float64)
         x[:, :, 0] = self.x0
         lex_cost = np.zeros(n_samples, dtype=np.float64)
         active = np.ones(n_samples, dtype=bool)
 
-        dt = self.sys.dt
-        incumbent_bound = self.best_overall_lex_cost
+        dt = float(self.sys.dt)
+        incumbent = self.best_overall_lex_cost
 
         for k in range(self.K - 1):
             if not np.any(active):
                 break
-            act_idx = np.flatnonzero(active)
-            self._evaluated_steps_total += act_idx.size
 
-            x[act_idx, :, k + 1] = x[act_idx, :, k] + dt * u_samples[act_idx, :, k]
+            act_idx = np.flatnonzero(active)
+            self._evaluated_steps_total += int(act_idx.size)
+            x[act_idx, :, k + 1] = (
+                x[act_idx, :, k] + dt * u_samples[act_idx, :, k]
+            )
             k_next = k + 1
 
             if k_next in self._rules_by_time:
                 x_curr = x[act_idx, 0, k_next]
-                for r_idx, cf in self._rules_by_time[k_next]:
-                    _, _, _, _, iv_lows, iv_highs, p_weight = self._rule_bounds[r_idx]
-                    r_cost = self._vectorized_interval_index(x_curr, iv_lows, iv_highs)
+                for r_idx, _cf in self._rules_by_time[k_next]:
+                    (
+                        _,
+                        _,
+                        _,
+                        _,
+                        iv_lows,
+                        iv_highs,
+                        p_weight,
+                    ) = self._rule_bounds[r_idx]
+                    r_cost = self._vectorized_interval_index(
+                        x_curr, iv_lows, iv_highs
+                    )
                     lex_cost[act_idx] += r_cost * p_weight
 
             if (
                 self.enable_certificate_pruning
-                and np.isfinite(incumbent_bound)
-                and (k_next < self.K - 1)
+                and np.isfinite(incumbent)
+                and k_next < self.K - 1
             ):
                 x_curr = x[act_idx, 0, k_next]
-                v_cert = self._evaluate_future_certificate(k_next, x_curr)
-                b_psi = lex_cost[act_idx] + v_cert
-
-                prune_mask = b_psi > incumbent_bound
-                if np.count_nonzero(~prune_mask) >= max(
-                    4, int(self.elite_quantile * n_samples)
-                ):
+                lower_bound = (
+                    lex_cost[act_idx]
+                    + self._evaluate_future_certificate(k_next, x_curr)
+                )
+                prune_mask = lower_bound > incumbent
+                keep_required = max(
+                    1,
+                    int(math.ceil(self.elite_quantile * n_samples)),
+                )
+                if np.count_nonzero(~prune_mask) >= keep_required:
                     pruned_global = act_idx[prune_mask]
-                    if pruned_global.size > 0:
+                    if pruned_global.size:
                         active[pruned_global] = False
-                        lex_cost[pruned_global] = b_psi[prune_mask] + 1e-3
-                        self._pruned_steps_total += pruned_global.size * (
-                            self.K - 1 - k_next
+                        lex_cost[pruned_global] = lower_bound[prune_mask]
+                        self._pruned_steps_total += int(
+                            pruned_global.size * (self.K - 1 - k_next)
                         )
+                        # Complete state rollout for visualization compatibility.
                         for rem_k in range(k_next, self.K - 1):
                             x[pruned_global, :, rem_k + 1] = (
                                 x[pruned_global, :, rem_k]
@@ -337,75 +418,86 @@ class FOMIGOSolver:
                             )
 
         y = x.copy()
-
-        reg_cost = 1e-6 * np.sum(u_samples[:, :, :-1] ** 2, axis=(1, 2))
+        reg_cost = 1e-6 * np.sum(
+            u_samples[:, :, :-1] ** 2, axis=(1, 2)
+        )
         total_cost = lex_cost + reg_cost
 
-        best_lex_sample = int(np.argmin(total_cost))
-        if lex_cost[best_lex_sample] < self.best_overall_lex_cost or (
-            lex_cost[best_lex_sample] == self.best_overall_lex_cost
-            and total_cost[best_lex_sample]
-            < self.best_overall_lex_cost
-            + 1e-6 * np.sum(self.best_overall_u[:, :-1] ** 2)
-        ):
-            self.best_overall_lex_cost = float(lex_cost[best_lex_sample])
-            self.best_overall_u = u_samples[best_lex_sample].copy()
+        # Lex-STL key is primary; effort is only a deterministic tie-breaker.
+        order = np.lexsort((total_cost, lex_cost))
+        best_idx = int(order[0])
 
-        # 4. IGO Quantile-based Elite Selection & Block-Diagonal xNES Natural Gradient Update
-        n_elite = max(2, int(round(self.elite_quantile * n_samples)))
-        elite_indices = np.argsort(total_cost, kind="stable")[:n_elite]
-        w_elite = np.full(n_elite, 1.0 / n_elite, dtype=np.float64)
+        best_candidate_lex = float(lex_cost[best_idx])
+        if best_candidate_lex < self.best_overall_lex_cost:
+            self.best_overall_lex_cost = best_candidate_lex
+            self.best_overall_u = u_samples[best_idx].copy()
 
-        for idx_b, (s_idx, e_idx) in enumerate(self.blocks):
-            dim_b = (e_idx - s_idx) * u_dim
-            A_b = A_blocks[idx_b]
+        n_elite = max(
+            1,
+            min(
+                n_samples,
+                int(math.ceil(self.elite_quantile * n_samples)),
+            ),
+        )
+        elite_indices = order[:n_elite]
+        w = np.full(n_elite, 1.0 / n_elite, dtype=np.float64)
 
-            eps_elites_b = eps[elite_indices, :, s_idx:e_idx].reshape(n_elite, dim_b)
-            s_elites_b = np.linalg.solve(A_b, eps_elites_b.T).T
+        for block_idx, (s_idx, e_idx) in enumerate(self.blocks):
+            A_b = A_blocks[block_idx]
+            dim_b = (e_idx - s_idx) * self.u_dim
+            s_elites = s_samples[
+                elite_indices, :, s_idx:e_idx
+            ].reshape(n_elite, dim_b)
 
-            grad_delta = np.sum(w_elite[:, None] * s_elites_b, axis=0)
-            grad_M = (s_elites_b.T * w_elite) @ s_elites_b - np.eye(dim_b)
+            grad_delta = np.sum(w[:, None] * s_elites, axis=0)
+            grad_M = (
+                (s_elites.T * w) @ s_elites
+                - np.eye(dim_b)
+            )
 
-            delta_m = self.lr_mean * (A_b @ grad_delta)
-            u[:, s_idx:e_idx] += delta_m.reshape(u_dim, e_idx - s_idx)
-            A_blocks[idx_b] = A_b @ expm(0.5 * self.lr_cov * grad_M)
+            u[:, s_idx:e_idx] += (
+                self.lr_mean * (A_b @ grad_delta)
+            ).reshape(self.u_dim, e_idx - s_idx)
+
+            symmetric_grad = 0.5 * (grad_M + grad_M.T)
+            A_new = A_b @ expm(
+                0.5 * self.lr_cov * symmetric_grad
+            )
+            if not np.all(np.isfinite(A_new)):
+                raise FloatingPointError(
+                    "xNES covariance update produced non-finite values"
+                )
+            A_blocks[block_idx] = A_new
 
         if self.input_clipping:
             u = np.clip(u, self.sys.u_min, self.sys.u_max)
 
         _, y_opt = self.forward_rollout(u)
-        return u, A_blocks, y_opt, y, best_lex_sample, total_cost
+        return u, A_blocks, y_opt, y, best_idx, total_cost
 
     def forward_rollout(self, u):
-        """Performs an integration step of the system dynamics."""
-        x = np.empty((self.sys.n, self.K))
+        x = np.empty((self.x_dim, self.K), dtype=np.float64)
         x[:, 0] = self.x0
-
-        f = self.sys.f
         for k in range(self.K - 1):
-            x[:, k + 1] = f(x[:, k], u[:, k])
-
+            x[:, k + 1] = self.sys.f(x[:, k], u[:, k])
         return x, x
 
     def calculate_path_cost(self, x, y, w, u, lamb, cov_inv):
-        """Calculate the path costs (kept for backward compatibility)."""
-        mppi_cost = 0
-        for k in range(self.K - 1):
-            mppi_cost += lamb * np.sum(u[:, k] @ cov_inv @ w[:, k])
+        # Legacy API. MPPI path-integral correction is intentionally ignored.
         lex_cost = self.evaluate(y)
-        return mppi_cost + lex_cost, lex_cost
+        secondary = 1e-6 * np.sum(np.asarray(u)[:, :-1] ** 2)
+        return lex_cost + secondary, lex_cost
 
     def evaluate(self, y):
-        rule_costs = []
-        for cost_func in self.cost_functions:
-            rule_costs.append(int(cost_func.evaluate_trajectory(y)))
+        rule_costs = [
+            int(cost_func.evaluate_trajectory(y))
+            for cost_func in self.cost_functions
+        ]
+        return sum(
+            rule_costs[i] * self.power_sums[i]
+            for i in range(len(rule_costs))
+        )
 
-        c_bar = 0
-        for i in range(len(rule_costs)):
-            c_bar += rule_costs[i] * self.power_sums[i]
 
-        return c_bar
-
-
-# Drop-in alias for seamless compatibility with existing evaluation scripts
+# Existing imports remain valid, but the backend is IGO/xNES.
 MPPISolver = FOMIGOSolver

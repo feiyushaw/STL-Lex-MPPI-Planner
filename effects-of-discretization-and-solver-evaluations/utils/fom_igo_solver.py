@@ -85,6 +85,13 @@ class FOMIGOSolver:
         self.y_dim = int(self.sys.p)
         self.control_horizon = self.K - 1
 
+        if self.K <= 1:
+            raise ValueError("K must be greater than one")
+        if self.n_iterations < 0:
+            raise ValueError("n_iterations must be non-negative")
+        if self.n_samples_constant <= 0 or self.n_samples_cosine <= 0 or self.n_samples_cosine_min <= 0:
+            raise ValueError("IGO sample counts must be positive")
+
         if not (0.0 < self.elite_quantile <= 1.0):
             raise ValueError("elite_quantile must be in (0, 1]")
         if self.block_steps <= 0:
@@ -147,6 +154,8 @@ class FOMIGOSolver:
         return 1.0
 
     def calculate_number_of_samples(self, iteration):
+        if iteration < 0 or iteration >= self.n_iterations:
+            raise ValueError("iteration is outside the configured IGO horizon")
         if self.samples_shrinking_method == "constant":
             return self.n_samples_constant
         if self.samples_shrinking_method == "cosine":

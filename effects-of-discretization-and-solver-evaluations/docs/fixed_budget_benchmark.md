@@ -57,21 +57,43 @@ From effects-of-discretization-and-solver-evaluations:
 
 This uses 20 iterations x 500 samples = 10,000 rollouts per run.
 
-## Empirical smoke benchmark results
+## Benchmark artifact status
 
-The benchmark was executed under Ubuntu 24.04 (20 scenarios x 3 seeds, 60 paired cases, 10,000 rollouts per method):
+A first Ubuntu smoke run was completed with 20 scenarios x 3 seeds and
+10,000 rollouts per method. That run reported:
 
-| Method | Runs | Optimal Match Rate | Mean Relative Gap (%) | Median Relative Gap (%) | Mean Solve Time (s) | Zero Violation Rate | Transition Effective Rate |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `legacy_mppi` | 60 | 71.67% | 2.231% | 0.000% | 0.4215s (421.5 ms) | 8.33% | 1.000 |
-| `igo` | 60 | **95.00%** | **0.058%** | 0.000% | **0.0109s (10.9 ms)** | **10.00%** | 1.000 |
-| `igo_pruning` | 60 | **95.00%** | **0.058%** | 0.000% | **0.0109s (10.9 ms)** | **10.00%** | 1.000 |
+- legacy MPPI optimal-match rate: 71.67%;
+- IGO optimal-match rate: 95.00%;
+- legacy MPPI mean solve time: 421.5 ms;
+- IGO mean solve time: 10.9 ms;
+- IGO strictly better in 16/60 paired cases, tied in 43/60, worse in 1/60.
 
-### Key takeaways
+However, the first run is now **archived and superseded**. Code inspection found
+that the feasible-incumbent state used by the pruning path was initialized but
+was not updated when a zero-cost trajectory was found. Consequently the
+reported igo_pruning row had zero pruning and was effectively identical to
+primal-only IGO. The old CSVs are retained under
+outputs/fixed_budget_benchmark/archive/ for provenance and must not be used
+as evidence for pruning effectiveness.
 
-1. **Efficiency**: IGO achieves a **~38.5x speedup** over legacy MPPI (10.9 ms vs 421.5 ms) while consuming identical rollout budgets (20 iterations x 500 samples).
-2. **Quality**: IGO improves the discrete optimal match rate from **71.7% to 95.0%** (+23.3% absolute improvement), reducing the mean relative gap from 2.231% to 0.058% (38x reduction).
-3. **Head-to-head**: Out of 60 paired runs, IGO strictly outperformed MPPI in **16 cases (26.7%)**, matched MPPI in **43 cases (71.7%)**, and trailed in only **1 case (1.7%)**.
+The current implementation now records a feasible incumbent explicitly and
+adds regression tests for both cases:
+
+- a feasible incumbent exists -> certificate pruning may activate;
+- no feasible incumbent exists -> pruning remains disabled.
+
+The benchmark must therefore be rerun before treating igo_pruning results as
+validated.
+
+The MPPI-vs-IGO result itself remains useful as a preliminary fixed-budget
+result. Its 38.5x wall-clock difference should be described as an
+**implementation-level end-to-end speed difference**, not as a pure theoretical
+speedup of IGO: the legacy reference uses a per-rollout Python loop whereas
+the IGO path is substantially vectorized.
+
+The 95% vs 71.67% optimal-match result is also a result on the repository's
+synthetic 1D Lex-STL benchmark, not yet evidence of CommonRoad planning
+superiority.
 
 ## Recommended stochastic study
 
@@ -90,4 +112,4 @@ very large evaluation budget. The repository benchmark is not a reproduction
 of the paper's unicycle obstacle benchmark. It instead evaluates the specific
 engineering question of replacing the existing Lex-STL MPPI backend.
 
-Reference: arXiv:2603.16231v3, Sections V-A and V-B.
+Reference: arXiv:2603.16231v3, Sections III-B and V-B.

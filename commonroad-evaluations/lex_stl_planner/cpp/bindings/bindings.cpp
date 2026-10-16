@@ -40,6 +40,14 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def_readwrite("time_horizon", &PlannerGeneralConfig::time_horizon)
         .def_readwrite("dt", &PlannerGeneralConfig::dt);
 
+    py::class_<PlannerIGOConfig>(m, "PlannerIGOConfig")
+        .def(py::init<>())
+        .def_readwrite("elite_quantile", &PlannerIGOConfig::elite_quantile)
+        .def_readwrite("block_steps", &PlannerIGOConfig::block_steps)
+        .def_readwrite("lr_mean", &PlannerIGOConfig::lr_mean)
+        .def_readwrite("lr_cov", &PlannerIGOConfig::lr_cov)
+        .def_readwrite("enable_certificate_pruning", &PlannerIGOConfig::enable_certificate_pruning);
+
     py::class_<PlannerMPPIConfig>(m, "PlannerMPPIConfig")
         .def(py::init<>())
         .def_readwrite("num_iterations", &PlannerMPPIConfig::num_iterations)
@@ -53,7 +61,8 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def_readwrite("n_samples_final", &PlannerMPPIConfig::n_samples_final)
         .def_readwrite("sampling_method", &PlannerMPPIConfig::sampling_method)
         .def_readwrite("seed", &PlannerMPPIConfig::seed)
-        .def_readwrite("return_best_sample", &PlannerMPPIConfig::return_best_sample);
+        .def_readwrite("return_best_sample", &PlannerMPPIConfig::return_best_sample)
+        .def_readwrite("igo", &PlannerMPPIConfig::igo);
 
     py::class_<PlannerPreemptiveMPPIConfig>(m, "PlannerPreemptiveMPPIConfig")
         .def(py::init<>())
@@ -245,6 +254,10 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def("getProfilerStats", &MPPIPlanner::getProfilerStats)
         .def("getConsideredObstacleIds", &MPPIPlanner::getConsideredObstacleIds)
         .def("getParameterSchedule", &MPPIPlanner::getParameterSchedule);
+
+    // Canonical public name for the active optimizer. The underlying C++ class
+    // remains MPPIPlanner to preserve the existing ABI and downstream bindings.
+    m.attr("IGOPlanner") = m.attr("MPPIPlanner");
 
     py::class_<PreemptiveMPPIPlanner>(m, "PreemptiveMPPIPlanner")
         .def(py::init<

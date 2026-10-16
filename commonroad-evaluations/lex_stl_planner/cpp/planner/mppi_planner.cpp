@@ -548,6 +548,8 @@ void MPPIPlanner::printPlannerInfo() const
     std::cout << "Total samples:    " << total_samples << std::endl;
     std::cout << "Block steps:      " << block_steps_ << std::endl;
     std::cout << "Elite quantile:   " << elite_quantile_ << std::endl;
+    std::cout << "Mean LR:          " << lr_mean_ << std::endl;
+    std::cout << "Covariance LR:    " << lr_cov_ << std::endl;
     std::cout << "Cert. pruning:    " << (enable_certificate_pruning_ ? "enabled" : "disabled") << std::endl;
     std::cout << "==========================================================\n"
               << std::endl;

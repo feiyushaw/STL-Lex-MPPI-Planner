@@ -90,8 +90,9 @@ std::vector<Eigen::MatrixXd> MPPIPlanner::initializeBlockFactors() const
     A_blocks.reserve(block_slices_.size());
     Eigen::VectorXd sigma_diag = initial_covariance_.diagonal().cwiseSqrt();
 
-    for (const auto &[start_col, num_cols] : block_slices_)
+    for (const auto &block_slice : block_slices_)
     {
+        const int num_cols = block_slice.second - block_slice.first;
         const int dim_b = u_dim_ * num_cols;
         Eigen::MatrixXd A_b = Eigen::MatrixXd::Zero(dim_b, dim_b);
         for (int c = 0; c < num_cols; ++c)

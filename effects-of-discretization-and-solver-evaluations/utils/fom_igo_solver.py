@@ -112,6 +112,7 @@ class FOMIGOSolver:
         )
 
         self.best_overall_lex_cost = float("inf")
+        self.best_feasible_lex_cost = float("inf")
         self.best_overall_u = None
         self.power_sums = self.precompute_power_sums()
 
@@ -367,7 +368,9 @@ class FOMIGOSolver:
         active = np.ones(n_samples, dtype=bool)
 
         dt = float(self.sys.dt)
-        incumbent = self.best_overall_lex_cost
+        # Certificate pruning is valid only against a feasible incumbent.
+        # A nonzero Lex-STL cost may still be improved by a feasible trajectory.
+        incumbent = self.best_feasible_lex_cost
 
         for k in range(self.K - 1):
             if not np.any(active):

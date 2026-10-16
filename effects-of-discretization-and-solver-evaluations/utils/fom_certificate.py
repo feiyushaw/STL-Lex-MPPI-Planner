@@ -100,6 +100,9 @@ class FOMCertificateProblem:
     terminal_cost_lipschitz: float = 0.0
     terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
     control_lipschitz_bound: Optional[Callable[[Array, "RegularGrid"], float]] = None
+    cell_slack_lower_bound: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], float]
+    ] = None
 
 
 @dataclass(frozen=True)
@@ -561,19 +564,21 @@ class SemiLagrangianFOMCertificate:
         return float(position_term + control_lower)
 
     def _estimate_slack_error(self, values: Array) -> float:
-        if len(self.grid.shape) != 3:
-            return self._generic_slack_error(values)
+        if self.problem.cell_slack_lower_bound is not None:
+            cell_shape = tuple(
+                n if axis in self.grid.periodic_axes else n - 1
+                for axis, n in enumerate(self.grid.shape)
+            )
+            worst = 0.0
+            for cell in np.ndindex(cell_shape):
+                lower = float(
+                    self.problem.cell_slack_lower_bound(values, self.grid, cell)
+                )
+                if np.isfinite(lower):
+                    worst = max(worst, -lower)
+            return float(max(0.0, worst))
 
-        worst = 0.0
-        cell_shape = tuple(
-            n if axis in self.grid.periodic_axes else n - 1
-            for axis, n in enumerate(self.grid.shape)
-        )
-        for cell in np.ndindex(cell_shape):
-            lower = self._paper_unicycle_cell_slack_lower(values, cell)
-            if np.isfinite(lower):
-                worst = max(worst, -float(lower))
-        return float(max(0.0, worst))
+        return self._generic_slack_error(values)
 
     def _generic_slack_error(self, values: Array) -> float:
         nodes = self.nodes
@@ -783,6 +788,102 @@ def make_paper_unicycle_problem(
         # unicycle, while d/du (r_u u^2) = 2 r_u u.
         return dt * max_grad_phi + 2.0 * r_control * max_u
 
+    def cell_slack_lower_bound(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        """Rigorous lower bound on ell + grad(V) dot f over one grid cell."""
+        h = grid.spacing
+        v = values.reshape(grid.shape)
+        corner_axes = []
+        for axis, i in enumerate(cell):
+            n = grid.shape[axis]
+            if axis in grid.periodic_axes:
+                corner_axes.append((i % n, (i + 1) % n))
+            else:
+                corner_axes.append((i, i + 1))
+
+        grad_bounds = []
+        for axis in range(3):
+            vals = []
+            other_axes = [a for a in range(3) if a != axis]
+            for bits in product((0, 1), repeat=2):
+                idx_lo = [0, 0, 0]
+                idx_hi = [0, 0, 0]
+                for j, a in enumerate(other_axes):
+                    idx_lo[a] = corner_axes[a][bits[j]]
+                    idx_hi[a] = idx_lo[a]
+                idx_lo[axis] = corner_axes[axis][0]
+                idx_hi[axis] = corner_axes[axis][1]
+                a = v[tuple(idx_lo)]
+                b = v[tuple(idx_hi)]
+                if np.isfinite(a) and np.isfinite(b):
+                    vals.append(float((b - a) / h[axis]))
+            if not vals:
+                return np.inf
+            grad_bounds.append((min(vals), max(vals)))
+
+        phi_lo = grid.lower[2] + cell[2] * h[2]
+        phi_hi = phi_lo + h[2]
+
+        def trig_interval(fn):
+            vals = [float(fn(phi_lo)), float(fn(phi_hi))]
+            if fn is np.sin:
+                k0 = int(np.ceil((phi_lo - np.pi / 2.0) / np.pi))
+                k1 = int(np.floor((phi_hi - np.pi / 2.0) / np.pi))
+                for k in range(k0, k1 + 1):
+                    vals.append(float(fn(np.pi / 2.0 + k * np.pi)))
+            else:
+                k0 = int(np.ceil(phi_lo / np.pi))
+                k1 = int(np.floor(phi_hi / np.pi))
+                for k in range(k0, k1 + 1):
+                    vals.append(float(fn(k * np.pi)))
+            return min(vals), max(vals)
+
+        def product_lower(a0, a1, b0, b1):
+            return min(a0 * b0, a0 * b1, a1 * b0, a1 * b1)
+
+        cos0, cos1 = trig_interval(np.cos)
+        sin0, sin1 = trig_interval(np.sin)
+        gx0, gx1 = grad_bounds[0]
+        gy0, gy1 = grad_bounds[1]
+        gp0, gp1 = grad_bounds[2]
+
+        xlo = grid.lower[0] + cell[0] * h[0]
+        xhi = xlo + h[0]
+        ylo = grid.lower[1] + cell[1] * h[1]
+        yhi = ylo + h[1]
+        dx = 0.0 if xlo <= goal[0] <= xhi else min(
+            abs(goal[0] - xlo), abs(goal[0] - xhi)
+        )
+        dy = 0.0 if ylo <= goal[1] <= yhi else min(
+            abs(goal[1] - ylo), abs(goal[1] - yhi)
+        )
+        position_cost_lower = q_position * (dx * dx + dy * dy)
+
+        position_transport_lower = forward_speed * (
+            product_lower(gx0, gx1, cos0, cos1)
+            + product_lower(gy0, gy1, sin0, sin1)
+        )
+
+        u_candidates = [
+            control_min,
+            control_max,
+            float(np.clip(-gp0 / (2.0 * r_control), control_min, control_max)),
+            float(np.clip(-gp1 / (2.0 * r_control), control_min, control_max)),
+        ]
+        control_lower = np.inf
+        for uu in u_candidates:
+            gphi = gp0 if uu >= 0.0 else gp1
+            control_lower = min(
+                control_lower, r_control * uu * uu + gphi * uu
+            )
+
+        return float(
+            position_cost_lower
+            + position_transport_lower
+            + control_lower
+        )
+
     return FOMCertificateProblem(
         dynamics=dynamics,
         running_cost=running_cost,
@@ -795,6 +896,7 @@ def make_paper_unicycle_problem(
         terminal_cost_lipschitz=0.0,
         terminal_cell_intersects=terminal_cell_intersects,
         control_lipschitz_bound=control_lipschitz_bound,
+        cell_slack_lower_bound=cell_slack_lower_bound,
     )
 
 

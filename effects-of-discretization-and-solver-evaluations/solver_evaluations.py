@@ -1,5 +1,3 @@
-import itertools
-import math
 import os
 
 import numpy as np
@@ -8,7 +6,7 @@ from interval import interval  # type: ignore
 from joblib import Parallel, delayed  # type: ignore
 from tabulate import tabulate  # type: ignore
 
-from utils.mppi_solver import MPPISolver
+from utils.fom_igo_solver import FOMIGOSolver
 from utils.simulation_environment_1d import (
     CostFunction,
     System,
@@ -17,43 +15,16 @@ from utils.simulation_environment_1d import (
 )
 
 
-def pregenerate_eps(
-    mppi_num_iterations,
-    mppi_n_samples_initial,
+def pregenerate_igo_latents(
+    n_iterations,
+    n_samples,
     K,
     u_dim,
-    mppi_initial_covariance,
-    mppi_gamma,
-    mppi_beta_min,
-    mppi_seed,
+    seed,
 ):
-    """Pre-generate samples for all MPPI solver runs."""
-    cov_base = np.array([[mppi_initial_covariance]])
-
-    def beta_exponential(i):
-        return math.sqrt(mppi_gamma**i)
-
-    def beta_cosine(i):
-        if mppi_num_iterations <= 1:
-            return mppi_beta_min
-        ratio = 0.5 * (1 - math.cos(math.pi * i / (mppi_num_iterations - 1)))
-        return 1.0 - (1.0 - mppi_beta_min) * ratio
-
-    beta_decay_functions = {"classic": beta_exponential, "cosine": beta_cosine}
-
-    np.random.seed(mppi_seed)
-    pregenerated = {}
-    for method, beta_fn in beta_decay_functions.items():
-        eps_method = np.zeros((mppi_num_iterations, mppi_n_samples_initial, u_dim, K))
-        for i in range(mppi_num_iterations):
-            cov_scaled = beta_fn(i) * cov_base
-            raw = np.random.multivariate_normal(
-                mean=np.zeros(u_dim), cov=cov_scaled, size=(mppi_n_samples_initial, K)
-            )
-            eps_method[i] = raw.transpose(0, 2, 1)
-        pregenerated[method] = eps_method
-
-    return pregenerated
+    """Pre-generate whitened IGO latent samples s ~ N(0,I)."""
+    rng = np.random.default_rng(seed)
+    return rng.standard_normal((n_iterations, n_samples, u_dim, K - 1))
 
 
 def load_scenarios(filepath):
@@ -69,7 +40,7 @@ def load_scenarios(filepath):
 
 
 def generate_cost_functions(shifts, n_rules):
-    """Generate cost functions for given shifts."""
+    """Generate pointwise rule costs for the 1D IGO benchmark."""
     cost_functions = []
     for rule_idx in range(n_rules):
         shift = shifts[rule_idx]
@@ -80,9 +51,9 @@ def generate_cost_functions(shifts, n_rules):
             direction = "neg"
             lb, ub = -10 + shift, shift
 
-        cost_func = CostFunction(lb, ub, direction, time=rule_idx + 1)
-        cost_functions.append(cost_func)
-
+        cost_functions.append(
+            CostFunction(lb, ub, direction, time=rule_idx + 1)
+        )
     return cost_functions
 
 
@@ -94,8 +65,8 @@ def check_violations(x_opt_disc, cost_functions, min_violations_threshold):
 
 
 def compute_discrete_lex_cost(x_opt_disc, cost_functions, x_0, K, system):
-    """Calculate discrete lex cost by evaluating at the midpoint of each reachable interval."""
-    mock_mppi_solver = MPPISolver(
+    """Evaluate the discrete reachable-set solution with the IGO Lex encoder."""
+    solver = FOMIGOSolver(
         cost_functions=cost_functions,
         x0=x_0[0][0],
         K=K,
@@ -104,24 +75,23 @@ def compute_discrete_lex_cost(x_opt_disc, cost_functions, x_0, K, system):
         verbose=False,
     )
     y_disc = np.array([[(iv[0][0] + iv[0][1]) / 2 for iv in x_opt_disc]])
-    return int(mock_mppi_solver.evaluate(y_disc))
+    return int(solver.evaluate(y_disc))
 
 
-def evaluate_scenario_mppi_ablation(
+def evaluate_scenario_igo(
     shifts,
     n_rules=8,
     combo=(5, 5, 5, 5, 5, 5, 5, 5),
-    mppi_num_iterations=30,
-    mppi_n_samples_initial=500,
-    mppi_n_samples_constant=500,
-    mppi_n_samples_final=50,
-    mppi_initial_covariance=0.5,
-    mppi_initial_lambda=1.0,
-    mppi_gamma=0.6,
-    mppi_beta_min=1e-6,
-    mppi_seed=42,
-    pregenerated_mppi_eps=None,
+    igo_num_iterations=30,
+    igo_n_samples=500,
+    igo_initial_covariance=0.5,
+    igo_seed=42,
+    igo_elite_quantile=0.05,
+    igo_block_steps=5,
+    igo_lr_mean=1.0,
+    igo_lr_cov=0.25,
     min_violations_threshold=1,
+    pregenerated_igo_samples=None,
 ):
     cost_functions = generate_cost_functions(shifts, n_rules)
 
@@ -132,66 +102,66 @@ def evaluate_scenario_mppi_ablation(
     system = System(dt=1.0, u_min=-1.35, u_max=1.35)
     K = n_rules + 1
 
-    # Compute the discrete reachable sets
     x_opt_disc = compute_reachable_intervals(
         x_0, cost_functions, system, use_discrete_cost=True
     )
 
-    if not check_violations(x_opt_disc, cost_functions, min_violations_threshold):
+    if not check_violations(
+        x_opt_disc, cost_functions, min_violations_threshold
+    ):
         return None
 
-    results = {
-        "disc_lex_cost": compute_discrete_lex_cost(
-            x_opt_disc, cost_functions, x_0, K, system
-        )
-    }
-
-    param_combinations = list(
-        itertools.product(["classic", "cosine"], ["constant", "cosine"])
+    disc_lex_cost = compute_discrete_lex_cost(
+        x_opt_disc, cost_functions, x_0, K, system
     )
 
-    for beta_decay_method, sample_count_decay_method in param_combinations:
-        pregenerated_iteration_noise = (
-            pregenerated_mppi_eps[beta_decay_method]
-            if pregenerated_mppi_eps is not None
-            else None
+    if pregenerated_igo_samples is not None:
+        expected_shape = (
+            igo_num_iterations,
+            igo_n_samples,
+            1,
+            K - 1,
         )
+        if pregenerated_igo_samples.shape[0] < expected_shape[0] or \
+           pregenerated_igo_samples.shape[1] < expected_shape[1]:
+            raise ValueError("pregenerated IGO samples are too small")
 
-        mppi_solver = MPPISolver(
-            cost_functions=cost_functions,
-            x0=x_0[0][0],
-            K=K,
-            system=system,
-            n_iterations=mppi_num_iterations,
-            n_samples_constant=mppi_n_samples_constant,
-            n_samples_cosine=mppi_n_samples_initial,
-            n_samples_cosine_min=mppi_n_samples_final,
-            cov=np.array([[mppi_initial_covariance]]),
-            lamb=mppi_initial_lambda,
-            gamma=mppi_gamma,
-            beta_shrinking_method=(
-                "exponential" if beta_decay_method == "classic" else beta_decay_method
-            ),
-            beta_min=mppi_beta_min,
-            samples_shrinking_method=sample_count_decay_method,
-            input_clipping=True,
-            random_seed=mppi_seed,
-            verbose=False,
-            pregenerated_eps=pregenerated_iteration_noise,
-        )
+    solver = FOMIGOSolver(
+        cost_functions=cost_functions,
+        x0=x_0[0][0],
+        K=K,
+        system=system,
+        n_iterations=igo_num_iterations,
+        n_samples_constant=igo_n_samples,
+        n_samples_cosine=igo_n_samples,
+        n_samples_cosine_min=igo_n_samples,
+        cov=np.array([[igo_initial_covariance]]),
+        lamb=1.0,  # compatibility only; ignored by IGO
+        gamma=1.0,  # compatibility only; ignored by IGO
+        beta_shrinking_method="exponential",  # compatibility only
+        beta_min=1e-6,  # compatibility only
+        samples_shrinking_method="constant",
+        input_clipping=True,
+        random_seed=igo_seed,
+        verbose=False,
+        pregenerated_eps=pregenerated_igo_samples,
+        elite_quantile=igo_elite_quantile,
+        block_steps=igo_block_steps,
+        lr_mean=igo_lr_mean,
+        lr_cov=igo_lr_cov,
+        enable_certificate_pruning=True,
+    )
 
-        res = mppi_solver.solve()
-        results[f"{beta_decay_method}_{sample_count_decay_method}_mppi"] = res[2]
-        results[f"{beta_decay_method}_{sample_count_decay_method}_best"] = res[9]
-
-    return results
+    res = solver.solve()
+    return {
+        "disc_lex_cost": disc_lex_cost,
+        "igo": int(res[2]),
+        "igo_best": int(res[9]),
+    }
 
 
 def output_statistics(all_results, output_dir, max_results=None):
-    # Filter out None results (scenarios that were skipped)
     valid_results = [res for res in all_results if res is not None]
-
-    # Optionally limit the number of evaluated results
     if max_results is not None:
         valid_results = valid_results[:max_results]
 
@@ -199,135 +169,82 @@ def output_statistics(all_results, output_dir, max_results=None):
         print("No valid results found to compute statistics.")
         return
 
-    baseline_key = "classic_constant_mppi"
-
-    ordered_keys = [
-        "classic_constant_mppi",
-        "disc_lex_cost",
-        "classic_constant_best",
-        "cosine_constant_mppi",
-        "cosine_constant_best",
-        "classic_cosine_mppi",
-        "classic_cosine_best",
-        "cosine_cosine_mppi",
-        "cosine_cosine_best",
-    ]
-
-    comprehensive_table_data = []
-
-    for comp_key in ordered_keys:
-        if comp_key not in valid_results[0]:
-            continue
-
-        lower_count = 0
-        equal_count = 0
-        worse_count = 0
-
-        gap_improvements = []
-        opt_gaps = []
-
+    rows = []
+    for key in ("igo", "igo_best"):
+        gaps = []
+        exact = 0
+        worse = 0
         for res in valid_results:
-            c_base = res.get(baseline_key)
-            c_comp = res.get(comp_key)
+            c = res.get(key)
             c_true = res.get("disc_lex_cost")
+            if c is None or c_true is None or c_true <= 0:
+                continue
 
-            if (
-                c_base is not None
-                and not np.isnan(c_base)
-                and c_comp is not None
-                and not np.isnan(c_comp)
-                and c_true is not None
-                and not np.isnan(c_true)
-                and c_true > 0
-            ):
-                if c_comp < c_base:
-                    lower_count += 1
-                elif c_comp == c_base:
-                    equal_count += 1
-                else:
-                    worse_count += 1
+            gap = ((float(c) - float(c_true)) / float(c_true)) * 100.0
+            gaps.append(gap)
+            if c == c_true:
+                exact += 1
+            elif c > c_true:
+                worse += 1
 
-                # Calculate relative gap as percentage (* 100)
-                g_base = ((c_base - c_true) / c_true) * 100
-                g_comp = ((c_comp - c_true) / c_true) * 100
-
-                opt_gaps.append(g_comp)
-                gap_improvements.append(g_comp - g_base)
-
-        total = lower_count + equal_count + worse_count
-        if total == 0:
+        if not gaps:
             continue
 
-        pct_lower = (lower_count / total) * 100
-        pct_equal = (equal_count / total) * 100
-        pct_worse = (worse_count / total) * 100
-
-        # diff_better_worse = pct_lower - pct_worse
-
-        mean_gap_imp = np.mean(gap_improvements) if gap_improvements else np.nan
-        mean_gap = np.mean(opt_gaps) if opt_gaps else np.nan
-
-        row = [
-            comp_key,
-            f"{pct_lower:.2f}%",
-            f"{pct_equal:.2f}%",
-            f"{pct_worse:.2f}%",
-            f"{mean_gap_imp:.3f}%",
-            f"{mean_gap:.3f}%",
-        ]
-
-        comprehensive_table_data.append(row)
+        rows.append(
+            [
+                key,
+                f"{100.0 * exact / len(gaps):.2f}%",
+                f"{100.0 * worse / len(gaps):.2f}%",
+                f"{np.mean(gaps):.3f}%",
+                f"{np.median(gaps):.3f}%",
+                f"{np.max(gaps):.3f}%",
+            ]
+        )
 
     headers = [
         "Method",
-        "Better (%)",
-        "Equal (%)",
-        "Worse (%)",
-        "Mean \u0394g (%)",
-        "Mean Rel. Gap (%)",
+        "Exact reachable optimum (%)",
+        "Above optimum (%)",
+        "Mean relative gap (%)",
+        "Median relative gap (%)",
+        "Max relative gap (%)",
     ]
+    table_str = tabulate(rows, headers=headers, stralign="right")
 
-    table_str = tabulate(comprehensive_table_data, headers=headers, stralign="right")
-
-    print("\n--- Comprehensive Ablation Study Statistics ---")
+    print("\n--- IGO Solver Evaluation Statistics ---")
     print(table_str)
 
-    # Save to file
     os.makedirs(output_dir, exist_ok=True)
-    total_valid = len(valid_results)
-    table_path = os.path.join(output_dir, "ablation_study_statistics.txt")
+    table_path = os.path.join(output_dir, "igo_solver_statistics.txt")
     with open(table_path, "w") as f:
         f.write(
-            f"Total Scenarios Evaluated: {total_valid} (after threshold filtering)\n\n"
+            f"Total Scenarios Evaluated: {len(valid_results)} "
+            "(after threshold filtering)\n\n"
         )
-        f.write("--- Comprehensive Ablation Study Statistics ---\n")
+        f.write("--- IGO Solver Evaluation Statistics ---\n")
         f.write(table_str)
         f.write("\n")
     print(f"\nSaved statistics table to {table_path}")
 
 
 if __name__ == "__main__":
-    # Run the ablation study
     run_new = True
     n_jobs = 10
 
-    # Parameters
     n_rules = 8
-    combo = (7, 7, 7, 7, 7, 7, 7, 7)  # Default uniform combo
+    combo = (7, 7, 7, 7, 7, 7, 7, 7)
     scenario_file = "scenarios/scenarios_n100000.txt"
     output_dir = "outputs/solver_evaluations"
     max_scenarios = 10000
 
-    # MPPI static parameters
-    mppi_n_samples_initial = 400
-    mppi_n_samples_constant = 400
-    mppi_n_samples_final = 250
-    mppi_num_iterations = 20
-    mppi_initial_covariance = 0.5
-    mppi_initial_lambda = 1.0
-    mppi_gamma = 0.6
-    mppi_beta_min = 1e-6
-    mppi_seed = 42
+    igo_n_samples = 400
+    igo_num_iterations = 20
+    igo_initial_covariance = 0.5
+    igo_seed = 42
+    igo_elite_quantile = 0.05
+    igo_block_steps = 5
+    igo_lr_mean = 1.0
+    igo_lr_cov = 0.25
 
     min_violations_threshold = 3
 
@@ -337,43 +254,38 @@ if __name__ == "__main__":
     total_scenarios = len(exp_setups)
     print(f"Loaded {total_scenarios} scenarios for evaluation.")
 
-    # Pre-generate samples for MPPI
-    pregenerated_mppi_eps = pregenerate_eps(
-        mppi_num_iterations,
-        mppi_n_samples_initial,
+    pregenerated_igo_samples = pregenerate_igo_latents(
+        igo_num_iterations,
+        igo_n_samples,
         n_rules + 1,
         1,
-        mppi_initial_covariance,
-        mppi_gamma,
-        mppi_beta_min,
-        mppi_seed,
+        igo_seed,
     )
 
     results_file = os.path.join(
-        output_dir, f"mppi_evaluation_results_n{total_scenarios}.csv"
+        output_dir, f"igo_evaluation_results_n{total_scenarios}.csv"
     )
 
     if run_new:
-        print("Starting parallel experiments...")
+        print("Starting parallel IGO experiments...")
         all_results = []
 
         for i, res in enumerate(
             Parallel(n_jobs=n_jobs)(
-                delayed(evaluate_scenario_mppi_ablation)(
+                delayed(evaluate_scenario_igo)(
                     shifts,
                     n_rules,
                     combo,
-                    mppi_num_iterations,
-                    mppi_n_samples_initial,
-                    mppi_n_samples_constant,
-                    mppi_n_samples_final,
-                    mppi_initial_covariance,
-                    mppi_initial_lambda,
-                    mppi_gamma,
-                    mppi_beta_min,
-                    mppi_seed,
-                    pregenerated_mppi_eps,
+                    igo_num_iterations,
+                    igo_n_samples,
+                    igo_initial_covariance,
+                    igo_seed,
+                    igo_elite_quantile,
+                    igo_block_steps,
+                    igo_lr_mean,
+                    igo_lr_cov,
                     min_violations_threshold=min_violations_threshold,
+                    pregenerated_igo_samples=pregenerated_igo_samples,
                 )
                 for shifts in exp_setups
             ),
@@ -387,8 +299,7 @@ if __name__ == "__main__":
 
         valid_results = [r for r in all_results if r is not None]
         os.makedirs(output_dir, exist_ok=True)
-        df = pd.DataFrame(valid_results)
-        df.to_csv(results_file, index=False)
+        pd.DataFrame(valid_results).to_csv(results_file, index=False)
         print(f"Results saved to {results_file}")
     else:
         print(f"Loading results from {results_file}...")

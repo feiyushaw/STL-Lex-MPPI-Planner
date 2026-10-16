@@ -97,6 +97,15 @@ struct PlannerGeneralConfig
     double dt;        // Time step [s]
 };
 
+struct PlannerIGOConfig
+{
+    double elite_quantile = 0.05;
+    int block_steps = 5;
+    double lr_mean = 1.0;
+    double lr_cov = 0.25;
+    bool enable_certificate_pruning = true;
+};
+
 struct PlannerMPPIConfig
 {
     int num_iterations;                    // Number of MPPI iterations J
@@ -110,7 +119,8 @@ struct PlannerMPPIConfig
     int n_samples_final;                   // Final number of samples M_final
     std::string sampling_method;           // Sampling method: "pureRandom", "randomLHS", "improvedLHS", or "maximinLHS"
     unsigned int seed;                     // Random seed for reproducibility
-    bool return_best_sample;               // If true, return the best overall sample instead of the weighted MPPI average solution
+    bool return_best_sample;               // If true, return the best overall sample
+    PlannerIGOConfig igo;                    // Active IGO backend configuration
 };
 
 struct PlannerPreemptiveMPPIConfig
@@ -340,6 +350,16 @@ public:
         planner.mppi.sampling_method = config["planner"]["mppi"]["sampling_method"].as<std::string>();
         planner.mppi.seed = config["planner"]["mppi"]["seed"].as<unsigned int>();
         planner.mppi.return_best_sample = config["planner"]["mppi"]["return_best_sample"].as<bool>();
+
+        YAML::Node igo_cfg = config["planner"]["mppi"]["igo"];
+        if (igo_cfg)
+        {
+            if (igo_cfg["elite_quantile"]) planner.mppi.igo.elite_quantile = igo_cfg["elite_quantile"].as<double>();
+            if (igo_cfg["block_steps"]) planner.mppi.igo.block_steps = igo_cfg["block_steps"].as<int>();
+            if (igo_cfg["lr_mean"]) planner.mppi.igo.lr_mean = igo_cfg["lr_mean"].as<double>();
+            if (igo_cfg["lr_cov"]) planner.mppi.igo.lr_cov = igo_cfg["lr_cov"].as<double>();
+            if (igo_cfg["enable_certificate_pruning"]) planner.mppi.igo.enable_certificate_pruning = igo_cfg["enable_certificate_pruning"].as<bool>();
+        }
 
         // Parse preemptive_mppi section (optional, defaults to MPPI parameters if not present)
         YAML::Node preemptive_mppi_cfg = config["planner"]["preemptive_mppi"];

@@ -1,5 +1,8 @@
 # STL-Lex-MPPI-Planner
 
+The historical MPPI planner interface is retained for compatibility, but the
+active optimization backend on the main planner path is IGO/xNES.
+
 Code to reproduce the numerical experiments from:
 
 Patrick Halder, Lothar Kiltz, Hannes Homburger, Johannes Reuter, Matthias Althoff,
@@ -16,7 +19,7 @@ This repository has two main experiment directories:
 1. [effects-of-discretization-and-solver-evaluations](effects-of-discretization-and-solver-evaluations)
 	 - Contains the experiments for:
 		 - effects of discretization,
-		 - MPPI solver adaptations,
+		 - IGO/xNES solver replacement for the historical MPPI backend,
 		 - comparison of robustness measures
 	 - Installation and usage instructions are in its local README.
 

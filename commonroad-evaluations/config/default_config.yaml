@@ -19,7 +19,15 @@ planner:
         n_samples_final: 100 # Final number of samples M_final
         sampling_method: "randomLHS" # Sampling method: "pureRandom", "randomLHS", "improvedLHS", or "maximinLHS"
         seed: 123 # Random seed for reproducibility
-        return_best_sample: True # If True, return the best overall sample instead of the weighted MPPI average solution
+        return_best_sample: True # If True, return the best overall sample
+        # Active optimizer: IGO / block-xNES. The legacy section name "mppi"
+        # is retained for planner/config compatibility.
+        igo:
+            elite_quantile: 0.05
+            block_steps: 5
+            lr_mean: 1.0
+            lr_cov: 0.25
+            enable_certificate_pruning: True
 
     preemptive_mppi:
         n_samples_initial: 1000 # Initial number of samples M_init

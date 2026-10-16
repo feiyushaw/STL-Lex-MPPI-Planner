@@ -64,7 +64,8 @@ struct FOMIGOBlockUpdater
 
         for (size_t b = 0; b < block_slices.size(); ++b)
         {
-            const auto [start_col, num_cols] = block_slices[b];
+            const auto [start_col, end_col] = block_slices[b];
+            const int num_cols = end_col - start_col;
             const int dim_b = mean_control.rows() * num_cols;
             Eigen::MatrixXd &A_b = A_blocks[b];
 

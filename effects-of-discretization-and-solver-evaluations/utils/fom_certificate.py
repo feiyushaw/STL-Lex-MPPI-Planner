@@ -282,6 +282,15 @@ class SemiLagrangianFOMCertificate:
         return candidate
 
     def _estimate_terminal_error(self, values: Array) -> float:
+        # K=0 uses the exact terminal warm start itself, so the terminal
+        # inequality is exact by construction.
+        if self.iterations == 0:
+            initial_terminal = np.asarray(
+                self.problem.terminal_cost(self.nodes), dtype=float
+            ).reshape(-1)
+            if np.allclose(values, initial_terminal, atol=1e-12, rtol=0.0):
+                return 0.0
+
         target = np.asarray(self.problem.terminal_set(self.nodes), dtype=bool)
         if not np.any(target):
             return 0.0

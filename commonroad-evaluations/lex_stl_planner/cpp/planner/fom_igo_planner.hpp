@@ -1,76 +1,125 @@
 #pragma once
 
-#include <Eigen/Dense>
-#include <unsupported/Eigen/MatrixFunctions>
 #include <algorithm>
-#include <cmath>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
-/**
- * @brief Implicit FOM with Certificate-Guided Block-Diagonal xNES (IGO) utilities.
- * Implements Section III-B (Corollary 1 & Proposition 4 prefix pruning) and
- * Section V-B (Block-Diagonal xNES natural gradient updates) from
- * Wei et al. (arXiv:2603.16231v3) over Lexicographic Bit-Shifted STL Costs.
- */
+#include <Eigen/Dense>
+
+// FOM-IGO primal search utilities.
+//
+// The active optimizer follows the implicit-FOM primal realization described
+// in Section V-B of Wei et al. (arXiv:2603.16231v3):
+//   u = m + A s,  s ~ N(0,I)
+// followed by IGO quantile selection and blockwise xNES updates.
 struct FOMIGOBlockUpdater
 {
-    static std::vector<std::pair<int, int>> buildBlockSlices(int horizon_steps, int block_steps)
+    static std::vector<std::pair<int, int>> buildBlockSlices(int K, int block_steps)
     {
-        std::vector<std::pair<int, int>> slices;
-        for (int s = 0; s < horizon_steps; s += block_steps)
+        if (K <= 0)
         {
-            int len = std::min(block_steps, horizon_steps - s);
-            slices.emplace_back(s, len);
+            throw std::invalid_argument("K must be positive");
+        }
+        if (block_steps <= 0)
+        {
+            throw std::invalid_argument("block_steps must be positive");
+        }
+
+        std::vector<std::pair<int, int>> slices;
+        for (int start = 0; start < K; start += block_steps)
+        {
+            slices.emplace_back(start, std::min(K, start + block_steps));
         }
         return slices;
     }
 
+    // Apply the xNES natural-gradient update to a block-diagonal Gaussian.
+    // standard_samples contains the actual whitened latent samples s_i used
+    // to generate each rollout; no inverse-A reconstruction is required.
     static void updateBlockXNES(
-        Eigen::MatrixXd &control_input,
+        Eigen::MatrixXd &mean_control,
         std::vector<Eigen::MatrixXd> &A_blocks,
         const std::vector<std::pair<int, int>> &block_slices,
-        const std::vector<Eigen::MatrixXd> &eps_samples,
+        const std::vector<Eigen::MatrixXd> &standard_samples,
         const std::vector<int> &elite_indices,
-        double lr_mean = 1.0,
-        double lr_cov = 0.25)
+        double lr_mean,
+        double lr_cov)
     {
-        const int n_elite = static_cast<int>(elite_indices.size());
-        if (n_elite <= 0)
+        if (elite_indices.empty())
         {
-            return;
+            throw std::invalid_argument("xNES requires at least one elite sample");
         }
-        const int u_dim = static_cast<int>(control_input.rows());
-        const double w_i = 1.0 / static_cast<double>(n_elite);
+        if (lr_mean < 0.0 || lr_cov < 0.0)
+        {
+            throw std::invalid_argument("xNES learning rates must be non-negative");
+        }
+        if (block_slices.size() != A_blocks.size())
+        {
+            throw std::invalid_argument("Block slices and covariance factors must have equal size");
+        }
+
+        const double weight = 1.0 / static_cast<double>(elite_indices.size());
 
         for (size_t b = 0; b < block_slices.size(); ++b)
         {
-            const int start_col = block_slices[b].first;
-            const int num_cols = block_slices[b].second;
-            const int dim_b = u_dim * num_cols;
+            const auto [start_col, num_cols] = block_slices[b];
+            const int dim_b = mean_control.rows() * num_cols;
+            Eigen::MatrixXd &A_b = A_blocks[b];
 
-            const Eigen::MatrixXd &A_b = A_blocks[b];
-            Eigen::FullPivLU<Eigen::MatrixXd> lu_A(A_b);
-
-            Eigen::VectorXd grad_delta = Eigen::VectorXd::Zero(dim_b);
-            Eigen::MatrixXd grad_M = -Eigen::MatrixXd::Identity(dim_b, dim_b);
-
-            for (int idx : elite_indices)
+            if (A_b.rows() != dim_b || A_b.cols() != dim_b)
             {
-                Eigen::MatrixXd eps_block = eps_samples[idx].middleCols(start_col, num_cols);
-                Eigen::VectorXd eps_vec = Eigen::Map<const Eigen::VectorXd>(eps_block.data(), dim_b);
-                Eigen::VectorXd s_ib = lu_A.solve(eps_vec);
-
-                grad_delta.noalias() += w_i * s_ib;
-                grad_M.noalias() += w_i * (s_ib * s_ib.transpose());
+                throw std::invalid_argument("Covariance block has inconsistent dimensions");
             }
 
-            Eigen::VectorXd delta_m = lr_mean * (A_b * grad_delta);
-            control_input.middleCols(start_col, num_cols) +=
-                Eigen::Map<const Eigen::MatrixXd>(delta_m.data(), u_dim, num_cols);
+            Eigen::VectorXd grad_delta = Eigen::VectorXd::Zero(dim_b);
+            Eigen::MatrixXd grad_M = Eigen::MatrixXd::Zero(dim_b, dim_b);
 
-            Eigen::MatrixXd scaled_grad_M = 0.5 * lr_cov * grad_M;
-            A_blocks[b] = A_b * scaled_grad_M.exp();
+            for (int sample_idx : elite_indices)
+            {
+                if (sample_idx < 0 || sample_idx >= static_cast<int>(standard_samples.size()))
+                {
+                    throw std::out_of_range("Elite sample index is outside the sample set");
+                }
+
+                const Eigen::MatrixXd &s_sample = standard_samples[sample_idx];
+                if (s_sample.rows() != mean_control.rows() ||
+                    start_col + num_cols > s_sample.cols())
+                {
+                    throw std::invalid_argument("Whitened sample has inconsistent dimensions");
+                }
+                if (!s_sample.allFinite())
+                {
+                    throw std::invalid_argument("Whitened sample contains non-finite values");
+                }
+
+                const Eigen::MatrixXd s_block =
+                    s_sample.middleCols(start_col, num_cols);
+                const Eigen::VectorXd s_vec =
+                    Eigen::Map<const Eigen::VectorXd>(s_block.data(), dim_b);
+
+                grad_delta += weight * s_vec;
+                grad_M += weight * (s_vec * s_vec.transpose());
+            }
+
+            grad_M -= Eigen::MatrixXd::Identity(dim_b, dim_b);
+            const Eigen::MatrixXd symmetric_grad =
+                0.5 * (grad_M + grad_M.transpose());
+
+            const Eigen::VectorXd delta_m =
+                lr_mean * (A_b * grad_delta);
+            mean_control.middleCols(start_col, num_cols) +=
+                Eigen::Map<const Eigen::MatrixXd>(
+                    delta_m.data(), mean_control.rows(), num_cols);
+
+            const Eigen::MatrixXd A_new =
+                A_b * (0.5 * lr_cov * symmetric_grad).exp();
+
+            if (!A_new.allFinite())
+            {
+                throw std::runtime_error("xNES covariance update produced non-finite values");
+            }
+            A_b = A_new;
         }
     }
 };

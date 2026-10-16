@@ -60,11 +60,9 @@ class PointwiseCost:
 def test_certificate_pruning_uses_only_feasible_incumbent():
     system = System(dt=1.0, u_min=0.0, u_max=1.0)
     # u=0 is feasible; positive-control samples cannot recover once x>0.
-    z = np.array(
-        [[[[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0],
-           [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]],
-        dtype=float,
-    )
+    z = np.zeros((1, 4, 1, 3), dtype=float)
+    z[0, 0, 0, :] = 1.0
+    z[0, 1, 0, :] = -1.0
     solver = FOMIGOSolver(
         [PointwiseCost(time=3, lb=0.0)],
         x0=0.0, K=4, system=system,

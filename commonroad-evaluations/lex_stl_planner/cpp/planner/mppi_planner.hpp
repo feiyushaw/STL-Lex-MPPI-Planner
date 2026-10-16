@@ -13,8 +13,10 @@
 
 #include "base_planner.hpp"
 #include "lhs_utility.hpp"
+#include "fom_igo_planner.hpp"
 
-// Model Predictive Path Integral (MPPI) planner implementation
+// Model Predictive Path Integral (MPPI) planner upgraded with
+// FOM Certificate-Guided Block-Diagonal xNES (IGO) backend
 class MPPIPlanner : public BasePlanner
 {
 public:
@@ -51,7 +53,15 @@ protected:
 
 private:
     // Core algorithm methods
-    std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint64_t> mppiStep(Eigen::MatrixXd control_input, int iteration);
+    std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint64_t> mppiStep(
+        Eigen::MatrixXd control_input,
+        int iteration,
+        std::vector<Eigen::MatrixXd> &A_blocks,
+        uint64_t incumbent_best_cost);
+
+    std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> forwardRolloutWithCertificatePruning(
+        const Eigen::MatrixXd &control_input,
+        uint64_t incumbent_best_cost) const;
 
     std::tuple<double, uint64_t> calculateTotalSampleCost(const Eigen::MatrixXd &x,
                                                           const Eigen::MatrixXd &y,
@@ -80,6 +90,7 @@ private:
     // Utility methods
     void printPlannerInfo() const;
     Eigen::MatrixXd initializeControlInput(const Eigen::MatrixXd &u_init) const;
+    std::vector<Eigen::MatrixXd> initializeBlockFactors() const;
 
     // Configuration parameters
     unsigned int seed_;
@@ -87,7 +98,7 @@ private:
     int num_iterations_;
     int max_threads_;
 
-    // MPPI algorithm parameters
+    // MPPI / FOM-IGO algorithm parameters
     Eigen::MatrixXd initial_covariance_;
     double initial_lambda_;
     double gamma_;
@@ -97,6 +108,15 @@ private:
     int n_samples_final_;
     std::string sampling_method_;
     bool return_best_sample_;
+
+    // FOM-IGO Block-xNES & Certificate Pruning parameters
+    int block_steps_ = 5;
+    double elite_quantile_ = 0.08;
+    double lr_mean_ = 1.0;
+    double lr_cov_ = 0.25;
+    bool enable_certificate_pruning_ = true;
+    std::vector<std::pair<int, int>> block_slices_;
+    uint64_t op_limits_weight_ = 0;
 
     // Config reference for cost function creation
     const Config *cfg_ptr_;

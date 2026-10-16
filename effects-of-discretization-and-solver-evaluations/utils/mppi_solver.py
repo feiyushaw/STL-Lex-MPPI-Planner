@@ -1,9 +1,12 @@
 """
-FOM Certificate-Guided Block-Diagonal xNES (IGO) Solver for STL-Lex-MPPI-Planner.
-Replaces the Shrinking-beta MPPI solver in `utils/mppi_solver.py` based on:
-Wei et al., "Featurized Occupation Measures for Structured Global Search in Numerical Optimal Control" (arXiv:2603.16231v3).
+Backward-compatible import surface for the planner optimizer.
+
+MPPISolver is retained as an import name only. Its implementation is
+FOMIGOSolver (IGO/xNES); MPPI weighting is no longer present.
 """
 
-from .fom_igo_solver import FOMIGOSolver, MPPISolver
+from .fom_igo_solver import FOMIGOSolver
+
+MPPISolver = FOMIGOSolver
 
 __all__ = ["FOMIGOSolver", "MPPISolver"]

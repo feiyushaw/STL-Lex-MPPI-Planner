@@ -94,7 +94,9 @@ class FOMIGOSolver:
             self._rules_by_time.setdefault(t_step, []).append((r_idx, cf))
             iv_lows = np.array([iv[0][0] for iv in cf.intervals], dtype=np.float64)
             iv_highs = np.array([iv[0][1] for iv in cf.intervals], dtype=np.float64)
-            self._rule_bounds.append((t_step, cf.direction, cf.lb, cf.ub, iv_lows, iv_highs, self.power_sums[r_idx]))
+            self._rule_bounds.append(
+                (t_step, cf.direction, cf.lb, cf.ub, iv_lows, iv_highs, self.power_sums[r_idx])
+            )
 
         self._pruned_steps_total = 0
         self._evaluated_steps_total = 0
@@ -141,7 +143,7 @@ class FOMIGOSolver:
                 f"Unknown samples shrinking method: {self.samples_shrinking_method}"
             )
 
-    def _ init_block_factors(self):
+    def _init_block_factors(self):
         init_std = np.sqrt(np.diag(self.cov)) if self.cov.ndim == 2 else np.sqrt(self.cov)
         base_std = float(init_std[0]) if np.size(init_std) > 0 else 1.0
         A_blocks = []
@@ -151,7 +153,9 @@ class FOMIGOSolver:
         return A_blocks
 
     @staticmethod
-    def _vectorized_interval_index(x_vals: np.ndarray, iv_lows: np.ndarray, iv_highs: np.ndarray) -> np.ndarray:
+    def _vectorized_interval_index(
+        x_vals: np.ndarray, iv_lows: np.ndarray, iv_highs: np.ndarray
+    ) -> np.ndarray:
         """Vectorized evaluation of CostFunction.evaluate_trajectory on 1D array x_vals."""
         in_iv = (x_vals[:, None] >= iv_lows[None, :]) & (x_vals[:, None] <= iv_highs[None, :])
         return np.argmax(in_iv, axis=1).astype(np.float64)
@@ -171,7 +175,6 @@ class FOMIGOSolver:
                 continue
             rem_steps = t_step - k_step
             if direction == "pos":
-                # Best reachable state to minimize positive violation is x_curr + rem_steps * dt * u_min
                 x_best_reach = x_curr + rem_steps * dt * u_min
                 viol_mask = x_best_reach > lb
                 if np.any(viol_mask):
@@ -180,7 +183,6 @@ class FOMIGOSolver:
                         * p_weight
                     )
             else:
-                # Best reachable state to minimize negative violation is x_curr + rem_steps * dt * u_max
                 x_best_reach = x_curr + rem_steps * dt * u_max
                 viol_mask = x_best_reach < ub
                 if np.any(viol_mask):
@@ -228,7 +230,6 @@ class FOMIGOSolver:
 
         best_overall_x, _ = self.forward_rollout(self.best_overall_u)
 
-        # In FOM-IGO, ensure final control sequence is at least as good as the best elite found
         final_u = u
         final_x, final_y = self.forward_rollout(final_u)
         cost = self.evaluate(final_y)
@@ -266,7 +267,9 @@ class FOMIGOSolver:
             s_half = np.random.standard_normal((half_n, u_dim, self.K))
             s_samples = np.concatenate([s_half, -s_half], axis=0)
             if s_samples.shape[0] < n_samples:
-                s_extra = np.random.standard_normal((n_samples - s_samples.shape[0], u_dim, self.K))
+                s_extra = np.random.standard_normal(
+                    (n_samples - s_samples.shape[0], u_dim, self.K)
+                )
                 s_samples = np.concatenate([s_samples, s_extra], axis=0)
 
         # 2. Map whitened samples through block-diagonal covariance factors A_blocks
@@ -297,11 +300,9 @@ class FOMIGOSolver:
             act_idx = np.flatnonzero(active)
             self._evaluated_steps_total += act_idx.size
 
-            # Forward step on active samples: x[k+1] = x[k] + dt * u[k]
             x[act_idx, :, k + 1] = x[act_idx, :, k] + dt * u_samples[act_idx, :, k]
             k_next = k + 1
 
-            # Accumulate prefix lexicographic cost at time step k_next
             if k_next in self._rules_by_time:
                 x_curr = x[act_idx, 0, k_next]
                 for r_idx, cf in self._rules_by_time[k_next]:
@@ -309,38 +310,43 @@ class FOMIGOSolver:
                     r_cost = self._vectorized_interval_index(x_curr, iv_lows, iv_highs)
                     lex_cost[act_idx] += r_cost * p_weight
 
-            # Corollary 1 Prefix Pruning Check: B_psi(k_next) = J_pre(k_next) + v_psi(k_next, x) > incumbent_bound
-            if self.enable_certificate_pruning and np.isfinite(incumbent_bound) and (k_next < self.K - 1):
+            if (
+                self.enable_certificate_pruning
+                and np.isfinite(incumbent_bound)
+                and (k_next < self.K - 1)
+            ):
                 x_curr = x[act_idx, 0, k_next]
                 v_cert = self._evaluate_future_certificate(k_next, x_curr)
                 b_psi = lex_cost[act_idx] + v_cert
 
-                # Keep enough elites unpruned while pruning trajectories that cannot beat incumbent + tolerance
                 prune_mask = b_psi > incumbent_bound
-                if np.count_nonzero(~prune_mask) >= max(4, int(self.elite_quantile * n_samples)):
+                if np.count_nonzero(~prune_mask) >= max(
+                    4, int(self.elite_quantile * n_samples)
+                ):
                     pruned_global = act_idx[prune_mask]
                     if pruned_global.size > 0:
                         active[pruned_global] = False
                         lex_cost[pruned_global] = b_psi[prune_mask] + 1e-3
-                        self._pruned_steps_total += pruned_global.size * (self.K - 1 - k_next)
-                        # Complete state rollout passively for visualization compatibility if needed
+                        self._pruned_steps_total += pruned_global.size * (
+                            self.K - 1 - k_next
+                        )
                         for rem_k in range(k_next, self.K - 1):
                             x[pruned_global, :, rem_k + 1] = (
-                                x[pruned_global, :, rem_k] + dt * u_samples[pruned_global, :, rem_k]
+                                x[pruned_global, :, rem_k]
+                                + dt * u_samples[pruned_global, :, rem_k]
                             )
 
         y = x.copy()
 
-        # Secondary control regularization cost for tie-breaking among equal lexicographic costs
         reg_cost = 1e-6 * np.sum(u_samples[:, :, :-1] ** 2, axis=(1, 2))
         total_cost = lex_cost + reg_cost
 
-        # Update best overall trajectory
         best_lex_sample = int(np.argmin(total_cost))
         if lex_cost[best_lex_sample] < self.best_overall_lex_cost or (
             lex_cost[best_lex_sample] == self.best_overall_lex_cost
             and total_cost[best_lex_sample]
-            < self.best_overall_lex_cost + 1e-6 * np.sum(self.best_overall_u[:, :-1] ** 2)
+            < self.best_overall_lex_cost
+            + 1e-6 * np.sum(self.best_overall_u[:, :-1] ** 2)
         ):
             self.best_overall_lex_cost = float(lex_cost[best_lex_sample])
             self.best_overall_u = u_samples[best_lex_sample].copy()
@@ -354,14 +360,12 @@ class FOMIGOSolver:
             dim_b = (e_idx - s_idx) * u_dim
             A_b = A_blocks[idx_b]
 
-            # Recover effective whitened coordinates of clipped elite controls
             eps_elites_b = eps[elite_indices, :, s_idx:e_idx].reshape(n_elite, dim_b)
             s_elites_b = np.linalg.solve(A_b, eps_elites_b.T).T
 
             grad_delta = np.sum(w_elite[:, None] * s_elites_b, axis=0)
             grad_M = (s_elites_b.T * w_elite) @ s_elites_b - np.eye(dim_b)
 
-            # Natural gradient updates in local coordinates
             delta_m = self.lr_mean * (A_b @ grad_delta)
             u[:, s_idx:e_idx] += delta_m.reshape(u_dim, e_idx - s_idx)
             A_blocks[idx_b] = A_b @ expm(0.5 * self.lr_cov * grad_M)

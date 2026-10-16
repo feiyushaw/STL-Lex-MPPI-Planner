@@ -793,7 +793,10 @@ def make_paper_unicycle_problem(
             *grid.spacing,
             edge_order=1,
         )[2]
-        max_grad_phi = float(np.nanmax(np.abs(grad_phi[np.isfinite(grad_phi)])))
+        finite = np.isfinite(grad_phi)
+        max_grad_phi = (
+            float(np.max(np.abs(grad_phi[finite]))) if np.any(finite) else 0.0
+        )
         max_u = max(abs(control_min), abs(control_max))
         # d/du V(x + dt f(x,u)) = dt * V_phi for the constant-speed
         # unicycle, while d/du (r_u u^2) = 2 r_u u.

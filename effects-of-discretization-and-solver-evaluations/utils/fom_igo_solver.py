@@ -427,7 +427,10 @@ class FOMIGOSolver:
                     pruned_global = act_idx[prune_mask]
                     if pruned_global.size:
                         active[pruned_global] = False
-                        lex_cost[pruned_global] = lower_bound[prune_mask]
+                        # A pruned rollout is discarded, not scored by its
+                        # lower bound. Otherwise an optimistic lower bound
+                        # could incorrectly enter the elite set.
+                        lex_cost[pruned_global] = np.inf
                         self._pruned_rollouts_total += int(pruned_global.size)
                         self._pruned_steps_total += int(
                             pruned_global.size * (self.K - 1 - k_next)

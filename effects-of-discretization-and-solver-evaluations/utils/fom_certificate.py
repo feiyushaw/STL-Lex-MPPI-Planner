@@ -247,6 +247,10 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_coarse_cell_lowers: dict[tuple[int, ...], float] = {}
         self._epsilon_final_cell_lowers: dict[tuple[int, ...], float] = {}
         self._epsilon_refined_cell_set: set[tuple[int, ...]] = set()
+        self._epsilon_refined_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_refined_worst_violation = 0.0
+        self._epsilon_unrefined_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_unrefined_worst_violation = 0.0
         self._epsilon_refinement_budget = self.refinement_budget
         self._epsilon_refinement_budget_exhausted = False
         self._bellman_monotone = True
@@ -797,6 +801,10 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_coarse_cell_lowers = {}
         self._epsilon_final_cell_lowers = {}
         self._epsilon_refined_cell_set = set()
+        self._epsilon_refined_worst_cell = None
+        self._epsilon_refined_worst_violation = 0.0
+        self._epsilon_unrefined_worst_cell = None
+        self._epsilon_unrefined_worst_violation = 0.0
         self._epsilon_refinement_budget_exhausted = False
         if self.iterations == 0 and self._has_exact_initial_subsolution():
             self._epsilon_worst_cell = None
@@ -941,6 +949,15 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_refined_cells = len(refined_cells)
         self._epsilon_refined_cell_set = set(refined_cells)
         self._epsilon_final_cell_lowers = dict(cell_lowers)
+        for cell, lower in cell_lowers.items():
+            violation = max(0.0, -lower)
+            if cell in refined_cells:
+                if violation > self._epsilon_refined_worst_violation:
+                    self._epsilon_refined_worst_violation = violation
+                    self._epsilon_refined_worst_cell = cell
+            elif violation > self._epsilon_unrefined_worst_violation:
+                self._epsilon_unrefined_worst_violation = violation
+                self._epsilon_unrefined_worst_cell = cell
         if len(refined_cells) >= max_refined_cells and cell_lowers:
             final_worst = max(
                 (max(0.0, -lower) for lower in cell_lowers.values()),

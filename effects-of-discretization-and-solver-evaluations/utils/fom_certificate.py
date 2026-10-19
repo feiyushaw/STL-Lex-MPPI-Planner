@@ -978,11 +978,20 @@ class SemiLagrangianFOMCertificate:
             and max_deep_refined_cells > 0
             and refined_cells
         ):
-            deep_candidates = sorted(
-                refined_cells,
+            global_worst_before_deep = max(
+                (max(0.0, -lower) for lower in cell_lowers.values()),
+                default=0.0,
+            )
+            deep_candidates = [
+                cell for cell in refined_cells
+                if max(0.0, -cell_lowers[cell])
+                >= 0.8 * global_worst_before_deep
+            ]
+            deep_candidates.sort(
                 key=lambda cell: max(0.0, -cell_lowers[cell]),
                 reverse=True,
-            )[:max_deep_refined_cells]
+            )
+            deep_candidates = deep_candidates[:max_deep_refined_cells]
             for cell in deep_candidates:
                 deep_lower = float(
                     deep_callback(effective_values, self.grid, cell)

@@ -188,11 +188,11 @@ class SemiLagrangianFOMCertificate:
         self._node_admissible = np.asarray(
             problem.admissible(self.nodes), dtype=bool
         ).reshape(self.grid.shape)
-        self._safe_zero_mask = self._make_safe_zero_mask()
+        self._obstacle_halo_mask = self._make_obstacle_halo_mask()
         self._boundary_extension_weights = self._make_boundary_extension_weights()
         boundary_surface = self._boundary_extension_weights == 0.0
         if problem.outside_domain_lower_bound is not None and np.any(
-            self._safe_zero_mask & boundary_surface
+            self._obstacle_halo_mask & boundary_surface
         ):
             raise ValueError(
                 "blocked-state halo intersects the outer grid boundary; "
@@ -221,13 +221,14 @@ class SemiLagrangianFOMCertificate:
         self._bellman_monotone = True
         self._discrete_subsolution = False
 
-    def _make_safe_zero_mask(self) -> Array:
-        """Mask admissible nodes adjacent to blocked/unknown states.
+    def _make_obstacle_halo_mask(self) -> Array:
+        """Mark admissible nodes adjacent to blocked/unknown states.
 
-        When no certified outside-domain extension exists, the outer grid
-        boundary is also pinned to the global lower bound. With a certified
-        extension, the boundary is anchored to that extension instead, avoiding
-        an artificial jump from zero to a large interior value.
+        Without a certified outside-domain extension, this halo is pinned to
+        the global lower bound to make interpolation fail closed. With the
+        radial extension, the mask is diagnostic only: pinning halo nodes to
+        zero would create an artificial residual jump against the radial
+        baseline and amplify the continuous HJB slack near obstacles.
         """
         shape = self.grid.shape
         dim = len(shape)
@@ -330,7 +331,7 @@ class SemiLagrangianFOMCertificate:
         # global lower bound in the residual interpolant, and the complete
         # halo-adjacent cell remains covered by the slack gate.
         if self._domain_baseline_nodes is None:
-            result[self._safe_zero_mask.reshape(-1)] = (
+            result[self._obstacle_halo_mask.reshape(-1)] = (
                 self.problem.global_value_lower_bound
             )
         result[~self._node_admissible.reshape(-1)] = np.inf
@@ -1089,7 +1090,7 @@ class SemiLagrangianFOMCertificate:
 
             corner_indices = list(self._cell_corner_indices(cell))
             touches_halo = any(
-                self._safe_zero_mask[index] for index in corner_indices
+                self._obstacle_halo_mask[index] for index in corner_indices
             )
             boundary_distances = [
                 min(cell[axis], cell_shape[axis] - 1 - cell[axis])

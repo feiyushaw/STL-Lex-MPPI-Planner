@@ -51,6 +51,17 @@ cellwise derivative intervals, exact trigonometric intervals, the exact
 position-cell minimum, and continuous minimization of the quadratic control
 term are used to obtain a one-sided slack bound.
 
+For the radial-extension benchmark, a second bound subdivides selected
+high-violation cells into 2x2x2 subcells. Derivative intervals are recomputed
+on each subcell from the same trilinear interpolant, while radial-gradient and
+trigonometric intervals are restricted to the subcell. The minimum of the
+subcell lower bounds is a lower bound for the parent cell. The estimator first
+records the all-cell coarse epsilon, then refines up to three batches of at
+most 64 near-worst cells. Unrefined cells retain their coarse bounds, and each
+cell retains the stronger of its coarse and refined lower bounds. Therefore
+the refinement can tighten epsilon but cannot make the certificate less
+conservative; it does not alter Bellman values or skip additional cells.
+
 The terminal error is bounded over every grid cell that intersects the
 admissible state domain. This is required by the current primal implementation:
 it evaluates the radial terminal cost at every endpoint and does not enforce
@@ -63,7 +74,11 @@ cost is nonnegative and vanishes on the target set.
 
 A built certificate reports:
 
-- epsilon: global running-slack feasibility tolerance;
+- epsilon: global running-slack feasibility tolerance after local
+  subdivision refinement;
+- epsilon_coarse: the same global tolerance before subdivision refinement;
+- epsilon_refined_cells: number of cells for which a refined bound was
+  evaluated;
 - epsilon_terminal: terminal feasibility tolerance;
 - epsilon_worst_cell: grid-cell index attaining the largest finite slack
   violation, for diagnosing where epsilon originates;
@@ -120,7 +135,9 @@ obstacle halo. Fully inadmissible cells are shown as excluded rather than
 silently omitted from the diagnostic. This method is read-only and does not
 change the cells or tolerances used by the certificate gate. The benchmark
 runner stores this neighborhood beside each capacity result so the source of
-the worst slack can be reviewed after a run.
+the worst slack can be reviewed after a run. It also records `epsilon_coarse`
+and `epsilon_refined_cells`, allowing the local-refinement benefit to be
+measured separately from the Bellman iteration count.
 
 ## Batched certificate queries
 

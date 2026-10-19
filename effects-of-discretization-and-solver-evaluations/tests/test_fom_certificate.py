@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 
 from utils.fom_certificate import (
@@ -92,7 +94,16 @@ def test_control_lipschitz_bound_scales_running_cost_derivative_by_dt():
 
 
 def test_interpolation_does_not_renormalize_around_infinite_corners():
-    cert = make_small_certificate(iterations=0)
+    base = make_small_certificate(iterations=0)
+    # Exercise the generic fail-closed path, which has no continuous
+    # outside-domain extension and therefore falls back to the global bound
+    # whenever a positive-weight corner is unavailable.
+    problem = replace(
+        base.problem,
+        outside_domain_lower_bound=None,
+        outside_domain_is_subsolution=False,
+    )
+    cert = SemiLagrangianFOMCertificate(problem, base.grid, iterations=0)
     cert.build()
     values = np.full(cert.grid.shape, 2.0, dtype=float)
     cell = (2, 2, 2)
@@ -109,6 +120,29 @@ def test_interpolation_does_not_renormalize_around_infinite_corners():
     assert cert._interpolate(values.reshape(-1), interior)[0] == (
         cert.problem.global_value_lower_bound
     )
+
+
+def test_radial_extension_is_continuous_across_grid_boundary():
+    cert = make_small_certificate(iterations=2)
+    cert.build()
+    inside = np.array([2.0 - 1e-8, 0.31, 0.2])
+    outside = np.array([2.0 + 1e-8, 0.31, 0.2])
+    value_inside = cert._interpolate(cert.values[-1], inside)[0]
+    value_outside = cert._interpolate(cert.values[-1], outside)[0]
+    assert abs(value_inside - value_outside) < 1e-5
+
+
+def test_residual_interpolation_is_continuous_at_obstacle_boundary():
+    cert = make_small_certificate(
+        iterations=2,
+        obstacles=((-0.5, 0.5, -0.5, 0.5),),
+    )
+    cert.build()
+    left = np.array([-0.5 - 1e-8, 0.25, 0.2])
+    right = np.array([-0.5 + 1e-8, 0.25, 0.2])
+    value_left = cert._interpolate(cert.values[-1], left)[0]
+    value_right = cert._interpolate(cert.values[-1], right)[0]
+    assert abs(value_left - value_right) < 1e-5
 
 
 def test_nonfinite_certificate_query_disables_pruning():

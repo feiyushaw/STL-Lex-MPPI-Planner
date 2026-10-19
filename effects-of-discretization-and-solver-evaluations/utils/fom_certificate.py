@@ -24,6 +24,7 @@ from itertools import product
 from typing import Callable, Optional, Sequence
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 
 Array = np.ndarray
@@ -371,6 +372,62 @@ class SemiLagrangianFOMCertificate:
         lo = self.grid.lower + np.asarray(cell, dtype=float) * self.grid.spacing
         return lo, lo + self.grid.spacing
 
+    def _effective_extension_values(self, values: Array) -> Array:
+        """Extend the radial residual through blocked nodes for interpolation.
+
+        The certificate is queried only on admissible states. Assigning the
+        global lower bound to every blocked corner creates an artificial jump
+        from the radial baseline at obstacle boundaries. Instead, extend the
+        residual V - v_rad from the nearest finite admissible node. Periodic
+        axes are tiled before the distance transform to respect wraparound.
+
+        This extension does not make blocked states admissible. The same
+        extended nodal field is used by interpolation, terminal-error
+        accounting, and the continuous cellwise HJB-slack bound.
+        """
+        raw = np.asarray(values, dtype=float).reshape(self.grid.shape)
+        baseline = self._domain_baseline_nodes
+        if baseline is None:
+            return np.where(
+                np.isfinite(raw),
+                raw,
+                self.problem.global_value_lower_bound,
+            ).reshape(-1)
+
+        valid = self._node_admissible & np.isfinite(raw)
+        if not np.any(valid):
+            return np.full(raw.size, self.problem.global_value_lower_bound)
+
+        residual = np.zeros(self.grid.shape, dtype=float)
+        residual[valid] = raw[valid] - baseline[valid]
+
+        tiled_valid = valid
+        for axis in sorted(self.grid.periodic_axes):
+            tiled_valid = np.concatenate(
+                (tiled_valid, tiled_valid, tiled_valid), axis=axis
+            )
+        _, nearest_indices = distance_transform_edt(
+            ~tiled_valid,
+            sampling=self.grid.spacing,
+            return_indices=True,
+        )
+        center = tuple(
+            slice(size, 2 * size)
+            if axis in self.grid.periodic_axes
+            else slice(None)
+            for axis, size in enumerate(self.grid.shape)
+        )
+        nearest = []
+        for axis, size in enumerate(self.grid.shape):
+            index = nearest_indices[(axis, *center)]
+            if axis in self.grid.periodic_axes:
+                index = index % size
+            nearest.append(index)
+
+        extended = baseline + residual[tuple(nearest)]
+        extended[valid] = raw[valid]
+        return extended.reshape(-1)
+
     def _interpolate(self, values: Array, points: Array) -> Array:
         """Interpolate without renormalizing away non-finite corners.
 
@@ -429,11 +486,10 @@ class SemiLagrangianFOMCertificate:
         baseline_nodes = self._domain_baseline_nodes
         interpolation_values = np.asarray(values, dtype=float).reshape(-1)
         if baseline_nodes is not None:
-            interpolation_values = np.where(
-                np.isfinite(interpolation_values),
-                interpolation_values,
-                self.problem.global_value_lower_bound,
-            ) - baseline_nodes
+            interpolation_values = (
+                self._effective_extension_values(interpolation_values)
+                - baseline_nodes.reshape(-1)
+            )
 
         result = np.zeros(p.shape[0], dtype=float)
         invalid_cell = np.zeros(p.shape[0], dtype=bool)
@@ -641,11 +697,7 @@ class SemiLagrangianFOMCertificate:
             # The maximum of a multilinear function over a cell is attained
             # at a corner, so all cells intersecting the admissible domain
             # must contribute to the global terminal-slack bound.
-            effective_values = np.where(
-                np.isfinite(values),
-                values,
-                self.problem.global_value_lower_bound,
-            )
+            effective_values = self._effective_extension_values(values)
             baseline = self._domain_baseline_nodes
             if baseline is None:
                 return np.inf
@@ -716,11 +768,7 @@ class SemiLagrangianFOMCertificate:
         worst_cell = None
         effective_values = None
         if self.problem.outside_domain_lower_bound is not None:
-            effective_values = np.where(
-                np.isfinite(values),
-                values,
-                self.problem.global_value_lower_bound,
-            )
+            effective_values = self._effective_extension_values(values)
         for cell in np.ndindex(cell_shape):
             corners = self._cell_corner_values(values, cell)
             if self.problem.outside_domain_lower_bound is not None:
@@ -730,10 +778,8 @@ class SemiLagrangianFOMCertificate:
                     and self.problem.cell_is_fully_inadmissible(lo, hi)
                 ):
                     continue
-                # Replace blocked-node sentinels with the declared global
-                # lower bound. The interpolant remains continuous and the
-                # cellwise callback bounds its actual residual-plus-radial
-                # gradient on every cell that intersects the admissible set.
+                # Use the same obstacle extension as the interpolant, so the
+                # cellwise callback bounds the gradient of the queried field.
                 lower = float(
                     self.problem.cell_slack_lower_bound(
                         effective_values, self.grid, cell
@@ -1013,11 +1059,7 @@ class SemiLagrangianFOMCertificate:
         selected = self.values[-1]
         has_extension = self.problem.outside_domain_lower_bound is not None
         effective_values = (
-            np.where(
-                np.isfinite(selected),
-                selected,
-                self.problem.global_value_lower_bound,
-            )
+            self._effective_extension_values(selected)
             if has_extension
             else selected
         )

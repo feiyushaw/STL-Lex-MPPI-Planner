@@ -85,13 +85,15 @@ from the HJB domain; ambiguous non-finite cells make the error gate infinite.
 
 The paper benchmark additionally supplies the analytic radial function as a
 global cost-to-go lower bound and as a continuous HJB subsolution outside the
-finite grid. The outer two node layers are anchored to this function, and
-out-of-grid queries use the same extension. This avoids the artificial jump
-created by pinning a large radial value to zero at the outer boundary. The
-HJB slack is still bounded over every in-grid cell, including the transition
-from the analytic boundary strip to the iterated values; no cells are omitted
-merely to improve epsilon. This extension is enabled only when the problem
-explicitly declares the outside function to be a subsolution. Queries without
+finite grid. The stored nodal field is represented as that analytic function
+plus a multilinearly interpolated residual. The residual is smoothly tapered
+to zero at the outer boundary over four node layers, and out-of-grid queries
+use the analytic radial function. This makes the boundary trace continuous
+without forcing a large radial value to jump to zero. The HJB slack is still
+bounded over every in-grid cell, including the tapered transition and cells
+adjacent to obstacles; no cells are omitted merely to improve epsilon. This
+extension is enabled only when the problem explicitly declares the outside
+function to be a subsolution and uses it as the terminal-cost baseline. Queries without
 a finite certificate value disable pruning. If a problem does not provide a
 rigorous cellwise HJB-slack bound or terminal-cell bound, its corresponding
 error is infinite and pruning is disabled; sampled nodal finite differences

@@ -1107,7 +1107,7 @@ class SemiLagrangianFOMCertificate:
                     "lower": lo.tolist(),
                     "upper": hi.tolist(),
                     "boundary_distance_cells": boundary_distance,
-                    "touches_safe_halo": bool(touches_halo),
+                    "touches_obstacle_halo": bool(touches_halo),
                     "fully_inadmissible": fully_blocked,
                     "included_in_slack_gate": bool(
                         not fully_blocked and lower is not None

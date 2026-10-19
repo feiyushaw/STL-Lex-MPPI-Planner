@@ -238,7 +238,28 @@ python -m pytest -q \
 Then run the C++ regression suite already associated with PR #1.
 
 Only after these checks pass should the paper-style certificate capacity study
-be run for K = 0, 50, 300.
+be run for K = 0, 50, 300. To compare the first-level global budget with the
+targeted second-level budget, use separate output directories:
+
+~~~bash
+python scripts/run_fom_certificate_igo.py \
+  --certificate-iterations 0 50 300 \
+  --certificate-refinement-budget 512 \
+  --certificate-deep-refinement-budget 0 \
+  --output outputs/fom_certificate_igo_budget512_nodeep
+
+python scripts/run_fom_certificate_igo.py \
+  --certificate-iterations 0 50 300 \
+  --certificate-refinement-budget 512 \
+  --certificate-deep-refinement-budget 8 \
+  --output outputs/fom_certificate_igo_budget512_deep8
+~~~
+
+Compare epsilon, the refined/unrefined/deep-refined worst violations, both
+budget-exhaustion flags, certificate-build time, pruning counts, and independent
+rollout cost checks. Do not infer success from the deep-cell diagnostic alone:
+the final epsilon must equal the maximum violation among all final per-cell
+certified lower bounds.
 
 The subsequent MPPI-vs-IGO comparison belongs to a separate experiment. It is
 not used to establish certificate correctness.

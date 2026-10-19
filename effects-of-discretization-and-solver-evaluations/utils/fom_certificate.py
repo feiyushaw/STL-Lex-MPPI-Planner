@@ -1026,7 +1026,11 @@ class SemiLagrangianFOMCertificate:
                 if violation > self._epsilon_unrefined_worst_violation:
                     self._epsilon_unrefined_worst_violation = violation
                     self._epsilon_unrefined_worst_cell = cell
-        if len(deep_refined_cells) >= max_deep_refined_cells and cell_lowers:
+        if (
+            max_deep_refined_cells > 0
+            and len(deep_refined_cells) >= max_deep_refined_cells
+            and cell_lowers
+        ):
             final_worst = max(
                 (max(0.0, -lower) for lower in cell_lowers.values()),
                 default=0.0,

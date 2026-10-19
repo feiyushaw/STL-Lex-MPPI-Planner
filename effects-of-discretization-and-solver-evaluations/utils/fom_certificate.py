@@ -1570,11 +1570,21 @@ def make_paper_unicycle_problem(
         values: Array,
         grid: RegularGrid,
         cell: tuple[int, int, int],
-        subdivisions: int,
+        subdivisions: int | tuple[int, int, int],
         *,
         return_components: bool = False,
     ) -> float | dict[str, object]:
         """Conservative HJB-slack bound, optionally with a term decomposition."""
+        if isinstance(subdivisions, int):
+            subdivisions_per_axis = (subdivisions,) * 3
+        else:
+            subdivisions_per_axis = tuple(int(value) for value in subdivisions)
+        if (
+            len(subdivisions_per_axis) != 3
+            or any(value < 1 for value in subdivisions_per_axis)
+        ):
+            raise ValueError("subdivisions must be positive for all three axes")
+        subdivision_scale = np.asarray(subdivisions_per_axis, dtype=float)
         h = grid.spacing
         nodal_values = np.asarray(values, dtype=float).reshape(grid.shape)
         if np.any(~np.isfinite(nodal_values)):
@@ -1631,9 +1641,13 @@ def make_paper_unicycle_problem(
             return min(vals), max(vals)
 
         subcell_reports: list[dict[str, object]] = []
-        for sub_index in product(range(subdivisions), repeat=3):
-            frac_lo = np.asarray(sub_index, dtype=float) / subdivisions
-            frac_hi = (np.asarray(sub_index, dtype=float) + 1.0) / subdivisions
+        for sub_index in product(
+            *(range(count) for count in subdivisions_per_axis)
+        ):
+            frac_lo = np.asarray(sub_index, dtype=float) / subdivision_scale
+            frac_hi = (
+                np.asarray(sub_index, dtype=float) + 1.0
+            ) / subdivision_scale
             sub_lo = parent_lo + frac_lo * h
             sub_hi = parent_lo + frac_hi * h
 
@@ -1787,7 +1801,11 @@ def make_paper_unicycle_problem(
         )
         if return_components:
             return {
-                "subdivisions_per_axis": int(subdivisions),
+                "subdivisions_per_axis": (
+                    subdivisions_per_axis[0]
+                    if len(set(subdivisions_per_axis)) == 1
+                    else list(subdivisions_per_axis)
+                ),
                 "subcell_count": len(subcell_reports),
                 "worst_subcell_index": worst_subcell["subcell_index"],
                 "worst_subcell_bounds": worst_subcell["subcell_bounds"],
@@ -1823,8 +1841,14 @@ def make_paper_unicycle_problem(
     def cell_slack_lower_bound_deep(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
     ) -> float:
+        # The dominant control contribution depends on dV/dphi, whose
+        # trilinear interval varies with x/y but not within the parent cell's
+        # phi coordinate. Spend more subdivisions spatially (4x4) and retain
+        # a 2-way heading split to tighten transport intervals at lower cost.
         return float(
-            cell_slack_lower_bound_impl(values, grid, cell, subdivisions=4)
+            cell_slack_lower_bound_impl(
+                values, grid, cell, subdivisions=(4, 4, 2)
+            )
         )
 
     def cell_slack_diagnostics(
@@ -1837,7 +1861,7 @@ def make_paper_unicycle_problem(
             values, grid, cell, subdivisions=2, return_components=True
         )
         deep = cell_slack_lower_bound_impl(
-            values, grid, cell, subdivisions=4, return_components=True
+            values, grid, cell, subdivisions=(4, 4, 2), return_components=True
         )
         assert (
             isinstance(coarse, dict)

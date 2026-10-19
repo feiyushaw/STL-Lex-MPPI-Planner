@@ -85,6 +85,11 @@ def main() -> None:
             iterations=capacity,
         )
         report = certificate.build()
+        worst_cell_neighborhood = (
+            certificate.cell_slack_neighborhood(radius=1)
+            if report.epsilon_worst_cell is not None
+            else []
+        )
 
         solver = CertificateGuidedIGOSolver(
             certificate,
@@ -129,6 +134,9 @@ def main() -> None:
                     if report.epsilon_worst_cell is not None
                     else None
                 ),
+                # Diagnostic-only neighborhood: this does not change the
+                # certificate gate or omit any admissible cell.
+                "epsilon_worst_cell_neighborhood": worst_cell_neighborhood,
                 "grid_nodes": report.grid_nodes,
                 "admissible_nodes": report.admissible_nodes,
                 "bellman_monotone": report.bellman_monotone,

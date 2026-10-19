@@ -320,9 +320,19 @@ class SemiLagrangianFOMCertificate:
             result[tapered] = baseline[tapered] + weights[tapered] * (
                 result[tapered] - baseline[tapered]
             )
-        result[self._safe_zero_mask.reshape(-1)] = (
-            self.problem.global_value_lower_bound
-        )
+        # Without a certified continuous extension, pin the admissible
+        # obstacle halo to the global lower bound so interpolation fails
+        # closed around unavailable corners. With the radial extension, do
+        # not overwrite halo nodes after tapering: forcing them to zero while
+        # anchoring the outer boundary to the radial baseline creates a large
+        # artificial residual jump in cells where the obstacle halo overlaps
+        # the boundary taper. Blocked corners are already replaced by the
+        # global lower bound in the residual interpolant, and the complete
+        # halo-adjacent cell remains covered by the slack gate.
+        if self._domain_baseline_nodes is None:
+            result[self._safe_zero_mask.reshape(-1)] = (
+                self.problem.global_value_lower_bound
+            )
         result[~self._node_admissible.reshape(-1)] = np.inf
         return result
 

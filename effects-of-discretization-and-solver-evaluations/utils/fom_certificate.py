@@ -116,6 +116,12 @@ class FOMCertificateProblem:
     cell_slack_lower_bound_refined: Optional[
         Callable[[Array, "RegularGrid", tuple[int, ...]], float]
     ] = None
+    # Optional second-level subdivision callback for the highest-impact
+    # already-refined cells. It must remain a conservative bound on the same
+    # parent-cell infimum.
+    cell_slack_lower_bound_deep: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], float]
+    ] = None
     # Diagnostic decomposition for the selected worst cell; does not affect
     # the certificate gate or any bound used for pruning.
     cell_slack_diagnostics: Optional[
@@ -158,6 +164,7 @@ class SemiLagrangianFOMCertificate:
         iterations: int = 0,
         monotone_start: bool = True,
         refinement_budget: int = 256,
+        deep_refinement_budget: int = 8,
     ) -> None:
         if problem.dt <= 0.0:
             raise ValueError("certificate dt must be positive")
@@ -173,6 +180,9 @@ class SemiLagrangianFOMCertificate:
         self.refinement_budget = int(refinement_budget)
         if self.refinement_budget < 0:
             raise ValueError("refinement_budget must be non-negative")
+        self.deep_refinement_budget = int(deep_refinement_budget)
+        if self.deep_refinement_budget < 0:
+            raise ValueError("deep_refinement_budget must be non-negative")
         if not np.isfinite(problem.global_value_lower_bound):
             raise ValueError("global_value_lower_bound must be finite")
         if not np.isfinite(problem.running_cost_lower_bound):
@@ -247,12 +257,17 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_coarse_cell_lowers: dict[tuple[int, ...], float] = {}
         self._epsilon_final_cell_lowers: dict[tuple[int, ...], float] = {}
         self._epsilon_refined_cell_set: set[tuple[int, ...]] = set()
+        self._epsilon_deep_refined_cell_set: set[tuple[int, ...]] = set()
         self._epsilon_refined_worst_cell: Optional[tuple[int, ...]] = None
         self._epsilon_refined_worst_violation = 0.0
+        self._epsilon_deep_refined_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_deep_refined_worst_violation = 0.0
         self._epsilon_unrefined_worst_cell: Optional[tuple[int, ...]] = None
         self._epsilon_unrefined_worst_violation = 0.0
         self._epsilon_refinement_budget = self.refinement_budget
+        self._epsilon_deep_refinement_budget = self.deep_refinement_budget
         self._epsilon_refinement_budget_exhausted = False
+        self._epsilon_deep_refinement_budget_exhausted = False
         self._bellman_monotone = True
         self._discrete_subsolution = False
 
@@ -801,11 +816,15 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_coarse_cell_lowers = {}
         self._epsilon_final_cell_lowers = {}
         self._epsilon_refined_cell_set = set()
+        self._epsilon_deep_refined_cell_set = set()
         self._epsilon_refined_worst_cell = None
         self._epsilon_refined_worst_violation = 0.0
+        self._epsilon_deep_refined_worst_cell = None
+        self._epsilon_deep_refined_worst_violation = 0.0
         self._epsilon_unrefined_worst_cell = None
         self._epsilon_unrefined_worst_violation = 0.0
         self._epsilon_refinement_budget_exhausted = False
+        self._epsilon_deep_refinement_budget_exhausted = False
         if self.iterations == 0 and self._has_exact_initial_subsolution():
             self._epsilon_worst_cell = None
             self._epsilon_coarse = 0.0
@@ -946,18 +965,74 @@ class SemiLagrangianFOMCertificate:
                     cell_lowers[cell] = max(cell_lowers[cell], refined_lower)
                     refined_cells.add(cell)
 
+        # Spend a separate, small budget on a deeper 4x4x4 enclosure for
+        # the highest-impact cells already processed by the first refinement
+        # level. This targets persistent local bottlenecks without multiplying
+        # the cost of every cell in the global refinement set.
+        deep_refined_cells: set[tuple[int, ...]] = set()
+        deep_callback = self.problem.cell_slack_lower_bound_deep
+        max_deep_refined_cells = self._epsilon_deep_refinement_budget
+        if (
+            deep_callback is not None
+            and effective_values is not None
+            and max_deep_refined_cells > 0
+            and refined_cells
+        ):
+            deep_candidates = sorted(
+                refined_cells,
+                key=lambda cell: max(0.0, -cell_lowers[cell]),
+                reverse=True,
+            )[:max_deep_refined_cells]
+            for cell in deep_candidates:
+                deep_lower = float(
+                    deep_callback(effective_values, self.grid, cell)
+                )
+                if not np.isfinite(deep_lower):
+                    self._epsilon_worst_cell = cell
+                    self._epsilon_refined_cells = len(refined_cells)
+                    self._epsilon_refined_cell_set = set(refined_cells)
+                    self._epsilon_deep_refined_cell_set = set(deep_refined_cells)
+                    self._epsilon_final_cell_lowers = dict(cell_lowers)
+                    return np.inf
+                # Both enclosures bound the same parent-cell infimum from
+                # below, so their maximum remains a valid certified lower bound.
+                cell_lowers[cell] = max(cell_lowers[cell], deep_lower)
+                deep_refined_cells.add(cell)
+
         self._epsilon_refined_cells = len(refined_cells)
         self._epsilon_refined_cell_set = set(refined_cells)
+        self._epsilon_deep_refined_cell_set = set(deep_refined_cells)
         self._epsilon_final_cell_lowers = dict(cell_lowers)
         for cell, lower in cell_lowers.items():
             violation = max(0.0, -lower)
+            if cell in deep_refined_cells:
+                if violation > self._epsilon_deep_refined_worst_violation:
+                    self._epsilon_deep_refined_worst_violation = violation
+                    self._epsilon_deep_refined_worst_cell = cell
             if cell in refined_cells:
                 if violation > self._epsilon_refined_worst_violation:
                     self._epsilon_refined_worst_violation = violation
                     self._epsilon_refined_worst_cell = cell
-            elif violation > self._epsilon_unrefined_worst_violation:
-                self._epsilon_unrefined_worst_violation = violation
-                self._epsilon_unrefined_worst_cell = cell
+            else:
+                if violation > self._epsilon_unrefined_worst_violation:
+                    self._epsilon_unrefined_worst_violation = violation
+                    self._epsilon_unrefined_worst_cell = cell
+        if len(deep_refined_cells) >= max_deep_refined_cells and cell_lowers:
+            final_worst = max(
+                (max(0.0, -lower) for lower in cell_lowers.values()),
+                default=0.0,
+            )
+            remaining_deep_candidates = [
+                cell for cell in refined_cells if cell not in deep_refined_cells
+            ]
+            self._epsilon_deep_refinement_budget_exhausted = bool(
+                remaining_deep_candidates
+                and final_worst > 0.0
+                and max(
+                    max(0.0, -cell_lowers[cell])
+                    for cell in remaining_deep_candidates
+                ) >= 0.8 * final_worst
+            )
         if len(refined_cells) >= max_refined_cells and cell_lowers:
             final_worst = max(
                 (max(0.0, -lower) for lower in cell_lowers.values()),
@@ -1287,6 +1362,9 @@ class SemiLagrangianFOMCertificate:
                 cell, coarse_lower
             )
             refined_in_certificate = cell in self._epsilon_refined_cell_set
+            deep_refined_in_certificate = (
+                cell in self._epsilon_deep_refined_cell_set
+            )
             corner_indices = list(self._cell_corner_indices(cell))
             touches_halo = any(
                 self._obstacle_halo_mask[index] for index in corner_indices
@@ -1326,6 +1404,7 @@ class SemiLagrangianFOMCertificate:
                     "coarse_slack_lower_bound": coarse_lower,
                     "slack_lower_bound": certified_lower,
                     "refined_in_certificate": refined_in_certificate,
+                    "deep_refined_in_certificate": deep_refined_in_certificate,
                     "slack_components": slack_components,
                     "violation": (
                         max(0.0, -certified_lower)
@@ -1732,6 +1811,13 @@ def make_paper_unicycle_problem(
             cell_slack_lower_bound_impl(values, grid, cell, subdivisions=2)
         )
 
+    def cell_slack_lower_bound_deep(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        return float(
+            cell_slack_lower_bound_impl(values, grid, cell, subdivisions=4)
+        )
+
     def cell_slack_diagnostics(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
     ) -> dict[str, object]:
@@ -1741,12 +1827,23 @@ def make_paper_unicycle_problem(
         refined = cell_slack_lower_bound_impl(
             values, grid, cell, subdivisions=2, return_components=True
         )
-        assert isinstance(coarse, dict) and isinstance(refined, dict)
+        deep = cell_slack_lower_bound_impl(
+            values, grid, cell, subdivisions=4, return_components=True
+        )
+        assert (
+            isinstance(coarse, dict)
+            and isinstance(refined, dict)
+            and isinstance(deep, dict)
+        )
         return {
             "coarse": coarse,
             "refined": refined,
+            "deep": deep,
             "refinement_gain": float(
                 refined["total_lower"] - coarse["total_lower"]
+            ),
+            "deep_refinement_gain": float(
+                deep["total_lower"] - refined["total_lower"]
             ),
         }
 
@@ -1771,6 +1868,7 @@ def make_paper_unicycle_problem(
         control_lipschitz_bound=control_lipschitz_bound,
         cell_slack_lower_bound=cell_slack_lower_bound,
         cell_slack_lower_bound_refined=cell_slack_lower_bound_refined,
+        cell_slack_lower_bound_deep=cell_slack_lower_bound_deep,
         cell_slack_diagnostics=cell_slack_diagnostics,
     )
 

@@ -711,6 +711,13 @@ class SemiLagrangianFOMCertificate:
         )
         worst = 0.0
         worst_cell = None
+        effective_values = None
+        if self.problem.outside_domain_lower_bound is not None:
+            effective_values = np.where(
+                np.isfinite(values),
+                values,
+                self.problem.global_value_lower_bound,
+            )
         for cell in np.ndindex(cell_shape):
             corners = self._cell_corner_values(values, cell)
             if self.problem.outside_domain_lower_bound is not None:
@@ -724,11 +731,6 @@ class SemiLagrangianFOMCertificate:
                 # lower bound. The interpolant remains continuous and the
                 # cellwise callback bounds its actual residual-plus-radial
                 # gradient on every cell that intersects the admissible set.
-                effective_values = np.where(
-                    np.isfinite(values),
-                    values,
-                    self.problem.global_value_lower_bound,
-                )
                 lower = float(
                     self.problem.cell_slack_lower_bound(
                         effective_values, self.grid, cell

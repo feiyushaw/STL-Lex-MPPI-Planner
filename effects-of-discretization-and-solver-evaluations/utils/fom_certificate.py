@@ -309,9 +309,13 @@ class SemiLagrangianFOMCertificate:
         if self._domain_baseline_nodes is not None:
             baseline = self._domain_baseline_nodes
             weights = self._boundary_extension_weights.reshape(-1)
-            finite_admissible = (
-                self._node_admissible.reshape(-1) & np.isfinite(result)
-            )
+            admissible = self._node_admissible.reshape(-1)
+            # If a feasible node has no usable Bellman successor, retain the
+            # declared global subsolution rather than introducing a new
+            # non-finite corner into the continuous extension.
+            unavailable = admissible & ~np.isfinite(result)
+            result[unavailable] = baseline[unavailable]
+            finite_admissible = admissible & np.isfinite(result)
             tapered = finite_admissible & (weights < 1.0)
             result[tapered] = baseline[tapered] + weights[tapered] * (
                 result[tapered] - baseline[tapered]

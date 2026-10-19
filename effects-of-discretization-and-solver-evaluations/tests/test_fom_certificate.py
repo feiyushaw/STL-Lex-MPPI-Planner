@@ -38,7 +38,7 @@ def make_small_certificate(iterations=0, obstacles=()):
 def test_radial_warm_start_matches_closed_form():
     p = np.array([[3.0, 0.0, 0.0], [0.0, 0.0, 1.2]])
     value = radial_terminal_cost(p, (0.0, 0.0), 1.0, 2.0, 1.0)
-    assert np.allclose(value, [16.0 / 3.0, 0.0])
+    assert np.allclose(value, [52.0 / 3.0, 0.0])
 
 
 def test_k0_certificate_has_zero_feasibility_error():
@@ -49,6 +49,47 @@ def test_k0_certificate_has_zero_feasibility_error():
     assert report.epsilon <= 1e-10
     assert report.discrete_subsolution
     assert report.bellman_monotone
+
+
+def test_k0_queries_use_the_analytic_radial_function_off_grid():
+    cert = make_small_certificate(iterations=0)
+    cert.build()
+    state = np.array([0.83, 0.17, 0.23])
+    expected = radial_terminal_cost(
+        state[None, :], (0.0, 0.0), 0.5, 1.0, 1.0
+    )[0]
+    assert np.isclose(cert.value(state), expected, rtol=0.0, atol=1e-12)
+
+
+def test_interpolation_does_not_renormalize_around_infinite_corners():
+    cert = make_small_certificate(iterations=0)
+    cert.build()
+    values = np.full(cert.grid.shape, 2.0, dtype=float)
+    cell = (2, 2, 2)
+    values[(3, 3, 3)] = np.inf
+
+    exact_node = cert.nodes[np.ravel_multi_index(cell, cert.grid.shape)]
+    assert np.isclose(
+        cert._interpolate(values.reshape(-1), exact_node)[0], 2.0
+    )
+
+    interior = cert.grid.lower + (
+        np.asarray(cell, dtype=float) + 0.5
+    ) * cert.grid.spacing
+    assert cert._interpolate(values.reshape(-1), interior)[0] == (
+        cert.problem.global_value_lower_bound
+    )
+
+
+def test_nonfinite_certificate_query_disables_pruning():
+    cert = make_small_certificate(
+        iterations=1,
+        obstacles=((-0.5, 0.5, -0.5, 0.5),),
+    )
+    cert.build()
+    blocked = np.array([0.0, 0.0, 0.0])
+    assert np.isinf(cert.value(blocked))
+    assert cert.corrected_lower_bound(blocked, 1.0) == -np.inf
 
 
 def test_value_iteration_is_monotone_and_tightens_from_below():

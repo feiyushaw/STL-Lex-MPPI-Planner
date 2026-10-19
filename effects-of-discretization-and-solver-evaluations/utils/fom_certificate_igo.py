@@ -200,7 +200,10 @@ class CertificateGuidedIGOSolver:
                         active[global_idx] = False
                         pruned[global_idx] = True
 
-        final_idx = np.flatnonzero(~infeasible)
+        # Only rollouts that remained active through the full horizon have
+        # a complete Bolza cost. Pruned prefixes are not trajectories and must
+        # never enter incumbent selection or the xNES elite population.
+        final_idx = np.flatnonzero(active)
         total = np.full(self.n_samples, np.inf, dtype=float)
         if final_idx.size:
             terminal = np.asarray(
@@ -209,11 +212,14 @@ class CertificateGuidedIGOSolver:
                 ),
                 dtype=float,
             ).reshape(-1)
-            total[final_idx] = (
-                prefix[final_idx] + terminal
-            )
-        return states, total, pruned, int(np.count_nonzero(infeasible)), int(
-            np.count_nonzero(active)
+            total[final_idx] = prefix[final_idx] + terminal
+        completed_count = int(final_idx.size)
+        return (
+            states,
+            total,
+            pruned,
+            int(np.count_nonzero(infeasible)),
+            completed_count,
         )
 
     def _update_distribution(

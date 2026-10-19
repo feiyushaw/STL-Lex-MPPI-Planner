@@ -1077,10 +1077,19 @@ def make_paper_unicycle_problem(
             return min(products), max(products)
 
         radial_scale = q_position / forward_speed
-        rgx0, rgx1 = interval_product(dx0, dx1, d_min, d_max)
-        rgy0, rgy1 = interval_product(dy0, dy1, d_min, d_max)
-        rgx0, rgx1 = radial_scale * rgx0, radial_scale * rgx1
-        rgy0, rgy1 = radial_scale * rgy0, radial_scale * rgy1
+        if d_max <= goal_radius:
+            # The clipped radial function is identically zero inside the goal.
+            rgx0 = rgx1 = rgy0 = rgy1 = 0.0
+        else:
+            rgx0, rgx1 = interval_product(dx0, dx1, d_min, d_max)
+            rgy0, rgy1 = interval_product(dy0, dy1, d_min, d_max)
+            rgx0, rgx1 = radial_scale * rgx0, radial_scale * rgx1
+            rgy0, rgy1 = radial_scale * rgy0, radial_scale * rgy1
+            if d_min < goal_radius:
+                # A cell crossing the target boundary contains both zero
+                # gradients (inside) and radial gradients (outside).
+                rgx0, rgx1 = min(rgx0, 0.0), max(rgx1, 0.0)
+                rgy0, rgy1 = min(rgy0, 0.0), max(rgy1, 0.0)
         grad_bounds[0] = (
             grad_bounds[0][0] + rgx0,
             grad_bounds[0][1] + rgx1,

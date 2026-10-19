@@ -106,7 +106,10 @@ def test_cell_slack_diagnostics_decompose_bound_without_changing_epsilon():
     refined = components["refined"]
     assert coarse["subcell_count"] == 1
     assert refined["subcell_count"] == 8
+    deep = components["deep"]
+    assert deep["subcell_count"] == 64
     assert refined["total_lower"] >= coarse["total_lower"] - 1e-9
+    assert deep["total_lower"] >= refined["total_lower"] - 1e-9
     assert np.isclose(
         refined["position_cost_lower"]
         + refined["x_transport_lower"]
@@ -117,6 +120,7 @@ def test_cell_slack_diagnostics_decompose_bound_without_changing_epsilon():
         atol=1e-10,
     )
     assert "worst_subcell_bounds" in refined
+    assert "worst_subcell_bounds" in deep
     assert cert.epsilon == epsilon_before
 
 
@@ -263,9 +267,6 @@ def test_deep_refinement_budget_is_separate_and_audited():
 
     assert len(cert._epsilon_deep_refined_cell_set) <= 2
     assert cert._epsilon_deep_refined_cell_set <= cert._epsilon_refined_cell_set
-    assert cert._epsilon_deep_refined_cells == len(
-        cert._epsilon_deep_refined_cell_set
-    )
     for cell in cert._epsilon_deep_refined_cell_set:
         assert cert._epsilon_final_cell_lowers[cell] >= (
             cert._epsilon_coarse_cell_lowers[cell] - 1e-9

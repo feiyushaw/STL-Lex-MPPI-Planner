@@ -432,6 +432,42 @@ class SemiLagrangianFOMCertificate:
             and same_terminal_function
         )
 
+    def _analytic_initial_bellman_backup(self) -> Array:
+        """Evaluate the K=0 analytic function at successor states directly."""
+        initial_fn = (
+            self.problem.initial_lower_bound
+            if self.problem.initial_lower_bound is not None
+            else self.problem.terminal_cost
+        )
+        nodes = self.nodes
+        admissible = self._node_admissible.reshape(-1)
+        candidate = np.full(nodes.shape[0], np.inf, dtype=float)
+        for control in np.asarray(self.problem.controls):
+            u = np.asarray(control, dtype=float)
+            if u.ndim == 0:
+                u = u.reshape(1)
+            controls = np.broadcast_to(u, (nodes.shape[0], u.size))
+            next_nodes = nodes + self.problem.dt * self.problem.dynamics(nodes, controls)
+            next_admissible = np.asarray(
+                self.problem.admissible(next_nodes), dtype=bool
+            )
+            next_value = np.asarray(initial_fn(next_nodes), dtype=float).reshape(-1)
+            stage = np.asarray(
+                self.problem.running_cost(nodes, controls), dtype=float
+            ).reshape(-1)
+            feasible = (
+                admissible
+                & next_admissible
+                & np.isfinite(next_value)
+                & np.isfinite(stage)
+            )
+            if np.any(feasible):
+                candidate[feasible] = np.minimum(
+                    candidate[feasible],
+                    self.problem.dt * stage[feasible] + next_value[feasible],
+                )
+        return candidate
+
     def _terminal_cell_cost_lower_bound(
         self, lo: Array, hi: Array, cell: tuple[int, ...]
     ) -> float:
@@ -594,21 +630,23 @@ class SemiLagrangianFOMCertificate:
         self._epsilon = self._estimate_slack_error(selected)
 
         if self.iterations == 0 and self._has_exact_initial_subsolution():
-            self._discrete_subsolution = True
+            # Do not test a grid interpolation of the analytic warm start.
+            # Evaluate the known continuous function at successor states.
+            backup = self._analytic_initial_bellman_backup()
         else:
             backup = self._bellman_backup(
                 selected,
                 enforce_monotone=False,
                 apply_control_correction=False,
             )
-            finite = self._node_admissible.reshape(-1) & np.isfinite(selected)
-            self._discrete_subsolution = bool(
-                np.any(finite)
-                and np.all(
-                    np.isfinite(backup[finite])
-                    & (backup[finite] >= selected[finite] - 1e-9)
-                )
+        finite = self._node_admissible.reshape(-1) & np.isfinite(selected)
+        self._discrete_subsolution = bool(
+            np.any(finite)
+            and np.all(
+                np.isfinite(backup[finite])
+                & (backup[finite] >= selected[finite] - 1e-9)
             )
+        )
         self._built = True
 
         finite_values = selected[np.isfinite(selected)]

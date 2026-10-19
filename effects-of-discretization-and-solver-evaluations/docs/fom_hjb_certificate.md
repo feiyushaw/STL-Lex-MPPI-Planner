@@ -80,8 +80,10 @@ subsolution and the same function is the terminal cost.
 For K > 0, an interpolation cell with a non-finite corner is never repaired by
 renormalizing the remaining corners. Such cells use the declared global value
 lower bound, and the admissible nodes adjacent to blocked cells and the outer
-grid boundary are pinned to that same lower bound. Queries without a finite
-certificate value disable pruning. If a problem does not provide a rigorous
+grid boundary are pinned to that same lower bound. Cells proven to lie wholly
+inside an obstacle are excluded from the HJB domain; ambiguous non-finite
+cells make the error gate infinite. Queries without a finite certificate
+value disable pruning. If a problem does not provide a rigorous
 cellwise HJB-slack bound or terminal-cell bound, its corresponding error is
 infinite and pruning is disabled; sampled nodal finite differences are not
 treated as a continuous certificate proof.

@@ -61,6 +61,15 @@ def test_k0_queries_use_the_analytic_radial_function_off_grid():
     assert np.isclose(cert.value(state), expected, rtol=0.0, atol=1e-12)
 
 
+def test_control_lipschitz_bound_scales_running_cost_derivative_by_dt():
+    cert = make_small_certificate(iterations=0)
+    problem = cert.problem
+    values = np.zeros(int(np.prod(cert.grid.shape)), dtype=float)
+    bound = problem.control_lipschitz_bound(values, cert.grid)
+    expected = problem.dt * 2.0 * 0.1 * 1.0
+    assert np.isclose(bound, expected, rtol=0.0, atol=1e-12)
+
+
 def test_interpolation_does_not_renormalize_around_infinite_corners():
     cert = make_small_certificate(iterations=0)
     cert.build()

@@ -789,6 +789,11 @@ class SemiLagrangianFOMCertificate:
         return float(max(0.0, upper))
 
     def _estimate_slack_error(self, values: Array) -> float:
+        self._epsilon_coarse_worst_cell = None
+        self._epsilon_coarse_cell_lowers = {}
+        self._epsilon_final_cell_lowers = {}
+        self._epsilon_refined_cell_set = set()
+        self._epsilon_refinement_budget_exhausted = False
         if self.iterations == 0 and self._has_exact_initial_subsolution():
             self._epsilon_worst_cell = None
             self._epsilon_coarse = 0.0

@@ -189,6 +189,14 @@ class SemiLagrangianFOMCertificate:
         self._node_admissible = np.asarray(
             problem.admissible(self.nodes), dtype=bool
         ).reshape(self.grid.shape)
+        # The admissibility mask is fixed over value iteration. Cache nearest
+        # admissible indices once; recomputing a distance transform inside
+        # every interpolation query would erase the batching speedup.
+        self._nearest_admissible_indices = (
+            self._build_nearest_admissible_indices()
+            if self._domain_baseline_nodes is not None
+            else None
+        )
         self._obstacle_halo_mask = self._make_obstacle_halo_mask()
         self._boundary_extension_weights = self._make_boundary_extension_weights()
         boundary_surface = self._boundary_extension_weights == 0.0
@@ -372,34 +380,13 @@ class SemiLagrangianFOMCertificate:
         lo = self.grid.lower + np.asarray(cell, dtype=float) * self.grid.spacing
         return lo, lo + self.grid.spacing
 
-    def _effective_extension_values(self, values: Array) -> Array:
-        """Extend the radial residual through blocked nodes for interpolation.
-
-        The certificate is queried only on admissible states. Assigning the
-        global lower bound to every blocked corner creates an artificial jump
-        from the radial baseline at obstacle boundaries. Instead, extend the
-        residual V - v_rad from the nearest finite admissible node. Periodic
-        axes are tiled before the distance transform to respect wraparound.
-
-        This extension does not make blocked states admissible. The same
-        extended nodal field is used by interpolation, terminal-error
-        accounting, and the continuous cellwise HJB-slack bound.
-        """
-        raw = np.asarray(values, dtype=float).reshape(self.grid.shape)
-        baseline = self._domain_baseline_nodes
-        if baseline is None:
-            return np.where(
-                np.isfinite(raw),
-                raw,
-                self.problem.global_value_lower_bound,
-            ).reshape(-1)
-
-        valid = self._node_admissible & np.isfinite(raw)
+    def _build_nearest_admissible_indices(self):
+        """Precompute nearest admissible grid nodes, respecting periodic axes."""
+        valid = self._node_admissible
         if not np.any(valid):
-            return np.full(raw.size, self.problem.global_value_lower_bound)
-
-        residual = np.zeros(self.grid.shape, dtype=float)
-        residual[valid] = raw[valid] - baseline[valid]
+            return None
+        if np.all(valid):
+            return tuple(np.indices(self.grid.shape, dtype=int))
 
         tiled_valid = valid
         for axis in sorted(self.grid.periodic_axes):
@@ -423,8 +410,38 @@ class SemiLagrangianFOMCertificate:
             if axis in self.grid.periodic_axes:
                 index = index % size
             nearest.append(index)
+        return tuple(nearest)
 
-        extended = baseline + residual[tuple(nearest)]
+    def _effective_extension_values(self, values: Array) -> Array:
+        """Extend the radial residual through blocked nodes for interpolation.
+
+        The certificate is queried only on admissible states. Assigning the
+        global lower bound to every blocked corner creates an artificial jump
+        from the radial baseline at obstacle boundaries. Instead, extend the
+        residual V - v_rad from the nearest admissible node. Nearest-node
+        indices are precomputed once per certificate and respect periodic
+        wraparound.
+
+        This extension does not make blocked states admissible. The same
+        extended nodal field is used by interpolation, terminal-error
+        accounting, and the continuous cellwise HJB-slack bound.
+        """
+        raw = np.asarray(values, dtype=float).reshape(self.grid.shape)
+        baseline = self._domain_baseline_nodes
+        if baseline is None:
+            return np.where(
+                np.isfinite(raw),
+                raw,
+                self.problem.global_value_lower_bound,
+            ).reshape(-1)
+
+        valid = self._node_admissible & np.isfinite(raw)
+        if not np.any(valid) or self._nearest_admissible_indices is None:
+            return np.full(raw.size, self.problem.global_value_lower_bound)
+
+        residual = np.zeros(self.grid.shape, dtype=float)
+        residual[valid] = raw[valid] - baseline[valid]
+        extended = baseline + residual[self._nearest_admissible_indices]
         extended[valid] = raw[valid]
         return extended.reshape(-1)
 

@@ -872,20 +872,25 @@ class SemiLagrangianFOMCertificate:
             default=0.0,
         )
         self._epsilon_coarse = float(coarse_epsilon)
-        self._epsilon_refined_cells = 0
+        self._epsilon_coarse_cell_lowers = dict(cell_lowers)
+        if coarse_epsilon > 0.0 and cell_lowers:
+            self._epsilon_coarse_worst_cell = max(
+                cell_lowers,
+                key=lambda cell: max(0.0, -cell_lowers[cell]),
+            )
 
-        # Refine only cells whose coarse bounds can materially affect the
-        # global maximum. Each refined callback must itself return a rigorous
-        # lower bound on the entire parent cell (the minimum of its subcell
-        # bounds). max(coarse, refined) remains a valid, tighter lower bound.
+        # Re-evaluate the near-active set until the global maximum is stable
+        # or the explicit cell-refinement budget is exhausted.
         refined_callback = self.problem.cell_slack_lower_bound_refined
+        refined_cells: set[tuple[int, ...]] = set()
+        max_refined_cells = self._epsilon_refinement_budget
+        max_candidates_per_pass = 64
         if (
             refined_callback is not None
             and effective_values is not None
             and coarse_epsilon > 0.0
         ):
-            refined_cells: set[tuple[int, ...]] = set()
-            for _ in range(3):
+            while len(refined_cells) < max_refined_cells:
                 current_worst = max(
                     (max(0.0, -lower) for lower in cell_lowers.values()),
                     default=0.0,
@@ -899,24 +904,21 @@ class SemiLagrangianFOMCertificate:
                     break
                 threshold = 0.8 * current_worst
                 candidates = [
-                    cell
-                    for cell in unrefined
+                    cell for cell in unrefined
                     if max(0.0, -cell_lowers[cell]) >= threshold
                 ]
+                # No candidate means the active global maximum is already
+                # refined; lower-impact cells cannot change epsilon yet.
                 if not candidates:
-                    candidates = [
-                        max(
-                            unrefined,
-                            key=lambda cell: max(0.0, -cell_lowers[cell]),
-                        )
-                    ]
+                    break
                 candidates.sort(
                     key=lambda cell: max(0.0, -cell_lowers[cell]),
                     reverse=True,
                 )
-                # Bound the extra work per pass. Unrefined cells retain their
-                # coarse certified bounds, so this cap affects tightness only.
-                candidates = candidates[:64]
+                remaining_budget = max_refined_cells - len(refined_cells)
+                candidates = candidates[
+                    :min(max_candidates_per_pass, remaining_budget)
+                ]
                 for cell in candidates:
                     refined_lower = float(
                         refined_callback(effective_values, self.grid, cell)
@@ -924,10 +926,31 @@ class SemiLagrangianFOMCertificate:
                     if not np.isfinite(refined_lower):
                         self._epsilon_worst_cell = cell
                         self._epsilon_refined_cells = len(refined_cells)
+                        self._epsilon_refined_cell_set = set(refined_cells)
+                        self._epsilon_final_cell_lowers = dict(cell_lowers)
                         return np.inf
+                    # The maximum of two certified lower bounds remains a
+                    # certified lower bound for the same parent-cell infimum.
                     cell_lowers[cell] = max(cell_lowers[cell], refined_lower)
                     refined_cells.add(cell)
-            self._epsilon_refined_cells = len(refined_cells)
+
+        self._epsilon_refined_cells = len(refined_cells)
+        self._epsilon_refined_cell_set = set(refined_cells)
+        self._epsilon_final_cell_lowers = dict(cell_lowers)
+        if len(refined_cells) >= max_refined_cells and cell_lowers:
+            final_worst = max(
+                (max(0.0, -lower) for lower in cell_lowers.values()),
+                default=0.0,
+            )
+            unrefined = [
+                cell for cell in cell_lowers if cell not in refined_cells
+            ]
+            self._epsilon_refinement_budget_exhausted = bool(
+                unrefined
+                and final_worst > 0.0
+                and max(max(0.0, -cell_lowers[cell]) for cell in unrefined)
+                >= 0.8 * final_worst
+            )
 
         worst = 0.0
         worst_cell = None

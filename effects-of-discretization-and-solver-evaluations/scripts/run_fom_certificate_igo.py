@@ -133,6 +133,10 @@ def main() -> None:
                 "admissible_nodes": report.admissible_nodes,
                 "bellman_monotone": report.bellman_monotone,
                 "discrete_subsolution": report.discrete_subsolution,
+                "initial_certificate_value": certificate.value(solver.x0),
+                "initial_corrected_lower_bound": certificate.corrected_lower_bound(
+                    solver.x0, solver.horizon_steps * problem.dt
+                ),
                 "best_cost": best_cost,
                 "incumbent_cost": solver.incumbent_cost,
                 "pruned_rollouts": solver.pruned_rollouts_total,

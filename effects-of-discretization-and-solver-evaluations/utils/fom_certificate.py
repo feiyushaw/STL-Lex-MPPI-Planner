@@ -712,6 +712,8 @@ def make_paper_unicycle_problem(
     """
     if forward_speed <= 0.0:
         raise ValueError("forward_speed must be positive")
+    if q_position <= 0.0 or r_control <= 0.0:
+        raise ValueError("q_position and r_control must be positive")
     if goal_radius <= 0.0:
         raise ValueError("goal_radius must be positive")
     if control_max <= control_min:
@@ -873,6 +875,7 @@ def make_paper_unicycle_problem(
         u_candidates = [
             control_min,
             control_max,
+            float(np.clip(0.0, control_min, control_max)),
             float(np.clip(-gp0 / (2.0 * r_control), control_min, control_max)),
             float(np.clip(-gp1 / (2.0 * r_control), control_min, control_max)),
         ]

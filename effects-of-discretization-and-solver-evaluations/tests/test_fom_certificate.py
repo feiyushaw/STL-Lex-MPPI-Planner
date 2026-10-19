@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from utils.fom_certificate import (
     RegularGrid,
@@ -10,7 +11,9 @@ from utils.fom_certificate import (
 )
 
 
-def make_small_certificate(iterations=0, obstacles=()):
+def make_small_certificate(
+    iterations=0, obstacles=(), refinement_budget=256
+):
     problem = make_paper_unicycle_problem(
         goal=(0.0, 0.0),
         goal_radius=0.5,
@@ -33,6 +36,7 @@ def make_small_certificate(iterations=0, obstacles=()):
         problem,
         grid,
         iterations=iterations,
+        refinement_budget=refinement_budget,
     )
     return cert
 
@@ -158,8 +162,56 @@ def test_global_epsilon_matches_the_final_bounds_used_for_pruning():
             row["coarse_slack_lower_bound"],
             atol=1e-12,
         )
+    assert np.isclose(
+        max(
+            cert._epsilon_refined_worst_violation,
+            cert._epsilon_unrefined_worst_violation,
+        ),
+        report.epsilon,
+        atol=1e-12,
+    )
     if report.epsilon > 0.0 and not cert._epsilon_refinement_budget_exhausted:
         assert row["refined_in_certificate"]
+
+
+def test_refinement_budget_must_be_non_negative():
+    problem = make_paper_unicycle_problem(
+        goal=(0.0, 0.0),
+        goal_radius=0.5,
+        forward_speed=1.0,
+        q_position=1.0,
+        r_control=0.1,
+        control_min=-1.0,
+        control_max=1.0,
+        dt=0.1,
+        n_controls=9,
+    )
+    grid = RegularGrid(
+        lower=np.array([-2.0, -2.0, -np.pi]),
+        upper=np.array([2.0, 2.0, np.pi]),
+        shape=(9, 9, 8),
+        periodic_axes=(2,),
+    )
+    with pytest.raises(ValueError, match="refinement_budget must be non-negative"):
+        SemiLagrangianFOMCertificate(
+            problem, grid, iterations=2, refinement_budget=-1
+        )
+
+
+def test_zero_refinement_budget_reports_unresolved_coarse_worst_cell():
+    cert = make_small_certificate(iterations=2, refinement_budget=0)
+    report = cert.build()
+
+    assert cert._epsilon_refined_cells == 0
+    assert cert._epsilon_refined_worst_cell is None
+    assert cert._epsilon_unrefined_worst_cell is not None
+    assert np.isclose(report.epsilon, cert._epsilon_coarse, atol=1e-12)
+    assert np.isclose(
+        cert._epsilon_unrefined_worst_violation,
+        report.epsilon,
+        atol=1e-12,
+    )
+    assert cert._epsilon_refinement_budget_exhausted
 
 
 def test_refined_cell_slack_bound_is_no_weaker_than_coarse_bound():

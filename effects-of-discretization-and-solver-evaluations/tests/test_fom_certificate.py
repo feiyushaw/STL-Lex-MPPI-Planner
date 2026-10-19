@@ -258,6 +258,18 @@ def test_refined_cell_slack_bound_is_no_weaker_than_coarse_bound():
     assert deep >= refined - 1e-9
 
 
+def test_zero_deep_refinement_budget_disables_stage_without_exhaustion():
+    cert = make_small_certificate(
+        iterations=2,
+        refinement_budget=32,
+        deep_refinement_budget=0,
+    )
+    cert.build()
+
+    assert cert._epsilon_deep_refined_cell_set == set()
+    assert not cert._epsilon_deep_refinement_budget_exhausted
+
+
 def test_deep_refinement_budget_is_separate_and_audited():
     cert = make_small_certificate(
         iterations=2,

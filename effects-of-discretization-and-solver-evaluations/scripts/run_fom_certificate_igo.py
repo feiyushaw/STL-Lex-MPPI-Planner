@@ -84,6 +84,12 @@ def main() -> None:
         default=256,
         help="maximum cells to refine for the continuous HJB slack bound",
     )
+    parser.add_argument(
+        "--certificate-deep-refinement-budget",
+        type=int,
+        default=8,
+        help="maximum already-refined cells to subdivide again at 4x4x4 resolution",
+    )
     parser.add_argument("--n-samples", type=int, default=500)
     parser.add_argument("--n-iterations", type=int, default=20)
     parser.add_argument(
@@ -108,6 +114,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.certificate_refinement_budget < 0:
         parser.error("--certificate-refinement-budget must be non-negative")
+    if args.certificate_deep_refinement_budget < 0:
+        parser.error("--certificate-deep-refinement-budget must be non-negative")
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +166,7 @@ def main() -> None:
             grid,
             iterations=capacity,
             refinement_budget=args.certificate_refinement_budget,
+            deep_refinement_budget=args.certificate_deep_refinement_budget,
         )
         certificate_build_started = time.perf_counter()
         report = certificate.build()
@@ -255,6 +264,28 @@ def main() -> None:
                 "epsilon_refinement_budget": int(certificate._epsilon_refinement_budget),
                 "epsilon_refinement_budget_exhausted": bool(
                     certificate._epsilon_refinement_budget_exhausted
+                ),
+                "epsilon_deep_refined_cells": int(
+                    len(certificate._epsilon_deep_refined_cell_set)
+                ),
+                "epsilon_deep_refinement_budget": int(
+                    certificate._epsilon_deep_refinement_budget
+                ),
+                "epsilon_deep_refinement_budget_exhausted": bool(
+                    certificate._epsilon_deep_refinement_budget_exhausted
+                ),
+                "epsilon_deep_refined_worst_cell": (
+                    list(certificate._epsilon_deep_refined_worst_cell)
+                    if certificate._epsilon_deep_refined_worst_cell is not None
+                    else None
+                ),
+                "epsilon_deep_refined_worst_violation": float(
+                    certificate._epsilon_deep_refined_worst_violation
+                ),
+                "epsilon_worst_cell_deep_refined_in_certificate": (
+                    tuple(report.epsilon_worst_cell)
+                    in certificate._epsilon_deep_refined_cell_set
+                    if report.epsilon_worst_cell is not None else None
                 ),
                 "epsilon_terminal": report.epsilon_terminal,
                 "epsilon_worst_cell": (

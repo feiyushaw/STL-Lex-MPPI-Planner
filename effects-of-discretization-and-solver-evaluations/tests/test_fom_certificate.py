@@ -61,6 +61,24 @@ def test_k0_queries_use_the_analytic_radial_function_off_grid():
     assert np.isclose(cert.value(state), expected, rtol=0.0, atol=1e-12)
 
 
+def test_certified_radial_extension_anchors_boundary_and_outside_queries():
+    cert = make_small_certificate(iterations=2)
+    cert.build()
+
+    values = cert.values[-1].reshape(cert.grid.shape)
+    radial = cert.problem.terminal_cost(cert.nodes).reshape(cert.grid.shape)
+
+    # The outer two node layers use the declared global subsolution, not zero.
+    assert np.allclose(values[:2, :, :], radial[:2, :, :])
+    assert np.allclose(values[-2:, :, :], radial[-2:, :, :])
+    assert not np.any(cert._safe_zero_mask[0, :, :])
+
+    outside = np.array([2.5, 0.0, 0.0])
+    expected = cert.problem.terminal_cost(outside[None, :])[0]
+    assert np.isclose(cert.value(outside), expected, rtol=0.0, atol=1e-12)
+    assert np.isfinite(cert.corrected_lower_bound(outside, 0.5))
+
+
 def test_control_lipschitz_bound_scales_running_cost_derivative_by_dt():
     cert = make_small_certificate(iterations=0)
     problem = cert.problem

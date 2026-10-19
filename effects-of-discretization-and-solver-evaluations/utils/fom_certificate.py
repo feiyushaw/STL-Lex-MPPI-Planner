@@ -180,6 +180,11 @@ class SemiLagrangianFOMCertificate:
                     "lower bound to be the exact terminal_cost callable"
                 )
 
+        self._domain_baseline_nodes = (
+            self._evaluate_outside_domain_lower_bound(self.nodes)
+            if problem.outside_domain_lower_bound is not None
+            else None
+        )
         self._node_admissible = np.asarray(
             problem.admissible(self.nodes), dtype=bool
         ).reshape(self.grid.shape)
@@ -301,8 +306,8 @@ class SemiLagrangianFOMCertificate:
 
     def _apply_safe_domain(self, values: Array) -> Array:
         result = np.asarray(values, dtype=float).reshape(-1).copy()
-        if self.problem.outside_domain_lower_bound is not None:
-            baseline = self._evaluate_outside_domain_lower_bound(self.nodes)
+        if self._domain_baseline_nodes is not None:
+            baseline = self._domain_baseline_nodes
             weights = self._boundary_extension_weights.reshape(-1)
             finite_admissible = (
                 self._node_admissible.reshape(-1) & np.isfinite(result)
@@ -406,10 +411,9 @@ class SemiLagrangianFOMCertificate:
                 lower_idx[:, axis] = i0
                 frac[:, axis] = np.clip(q - i0, 0.0, 1.0)
 
-        baseline_nodes = None
+        baseline_nodes = self._domain_baseline_nodes
         interpolation_values = np.asarray(values, dtype=float).reshape(-1)
-        if self.problem.outside_domain_lower_bound is not None:
-            baseline_nodes = self._evaluate_outside_domain_lower_bound(self.nodes)
+        if baseline_nodes is not None:
             interpolation_values = np.where(
                 np.isfinite(interpolation_values),
                 interpolation_values,
@@ -621,7 +625,9 @@ class SemiLagrangianFOMCertificate:
                 values,
                 self.problem.global_value_lower_bound,
             )
-            baseline = self._evaluate_outside_domain_lower_bound(self.nodes)
+            baseline = self._domain_baseline_nodes
+            if baseline is None:
+                return np.inf
             residual = effective_values - baseline
             if np.any(target_nodes):
                 upper = max(upper, float(np.max(residual[target_nodes])))

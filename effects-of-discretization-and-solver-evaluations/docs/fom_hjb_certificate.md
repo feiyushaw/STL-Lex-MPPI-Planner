@@ -106,6 +106,28 @@ rigorous cellwise HJB-slack bound or terminal-cell bound, its corresponding
 error is infinite and pruning is disabled; sampled nodal finite differences
 are not treated as a continuous certificate proof.
 
+## Local slack audit
+
+\`cell_slack_neighborhood(center, radius=1)\` reports the selected cell and its
+neighbors with their physical bounds, lower slack bound, violation, distance
+to the outer grid boundary, and whether any corner touches the conservative
+obstacle halo. Fully inadmissible cells are shown as excluded rather than
+silently omitted from the diagnostic. This method is read-only and does not
+change the cells or tolerances used by the certificate gate. The benchmark
+runner stores this neighborhood beside each capacity result so the source of
+the worst slack can be reviewed after a run.
+
+## Batched certificate queries
+
+\`value_batch\`, \`corrected_lower_bound_batch\`, and \`prefix_bound_batch\` are
+vectorized counterparts of the scalar query methods. The IGO rollout loop
+uses a single batch prefix-bound query for all currently active rollouts at
+each horizon step. This avoids one Python-level interpolation call per
+sample while preserving the same conservative rule: non-finite or
+inadmissible certificate queries return a lower bound of negative infinity
+and therefore cannot trigger pruning. Scalar-versus-batch equivalence and
+pruned-rollout isolation are covered by regression tests.
+
 For custom Bolza problems, `global_value_lower_bound` must be a valid lower
 bound on every admissible cost-to-go, and `running_cost_lower_bound` must be a
 valid global lower bound on the running cost. Their zero defaults are valid

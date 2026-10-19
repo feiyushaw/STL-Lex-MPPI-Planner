@@ -84,6 +84,40 @@ def test_certified_radial_extension_anchors_boundary_and_outside_queries():
     assert np.isfinite(cert.corrected_lower_bound(outside, 0.5))
 
 
+def test_radial_extension_uses_nearest_residual_at_blocked_nodes():
+    cert = make_small_certificate(
+        iterations=2,
+        obstacles=((-1.0, -0.5, 0.5, 1.0),),
+    )
+    cert.build()
+    values = cert.values[-1]
+    effective = cert._effective_extension_values(values)
+    baseline = cert._domain_baseline_nodes.reshape(-1)
+    blocked = ~cert._node_admissible.reshape(-1)
+
+    assert np.any(blocked)
+    assert np.all(np.isfinite(effective))
+    # These obstacle nodes are away from the target, so the radial baseline
+    # is strictly positive. A zero surrogate would recreate the artificial
+    # baseline jump that dominates the global HJB slack.
+    assert np.all(baseline[blocked] > 0.0)
+    assert np.all(effective[blocked] > 0.0)
+    assert np.allclose(
+        effective[cert._node_admissible.reshape(-1)],
+        values[cert._node_admissible.reshape(-1)],
+    )
+
+    # The exact same extended nodal field is passed to the cellwise slack
+    # callback for a partially blocked cell.
+    cell = (1, 5, 2)
+    lo, hi = cert._cell_bounds(cell)
+    assert not cert.problem.cell_is_fully_inadmissible(lo, hi)
+    lower = cert.problem.cell_slack_lower_bound(
+        effective, cert.grid, cell
+    )
+    assert np.isfinite(lower)
+
+
 def test_certified_radial_extension_does_not_pin_obstacle_halo_to_zero():
     cert = make_small_certificate(
         iterations=2,

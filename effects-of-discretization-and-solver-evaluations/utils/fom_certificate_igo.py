@@ -190,15 +190,21 @@ class CertificateGuidedIGOSolver:
                 remaining_time = self.problem.dt * (
                     self.horizon_steps - (k + 1)
                 )
-                for local, global_idx in enumerate(idx):
-                    bound = self.certificate.prefix_bound(
-                        prefix[global_idx],
-                        states[global_idx, :, k + 1],
-                        remaining_time,
-                    )
-                    if bound > self.incumbent_cost + self.pruning_tolerance:
-                        active[global_idx] = False
-                        pruned[global_idx] = True
+                # Query all active prefixes in one vectorized certificate pass.
+                # The scalar path performs a separate interpolation for every
+                # sample and horizon step, which is a major Python overhead at
+                # the paper benchmark's 10,000-rollout budget.
+                bounds = self.certificate.prefix_bound_batch(
+                    prefix[idx],
+                    states[idx, :, k + 1],
+                    remaining_time,
+                )
+                prune_local = bounds > (
+                    self.incumbent_cost + self.pruning_tolerance
+                )
+                prune_idx = idx[prune_local]
+                active[prune_idx] = False
+                pruned[prune_idx] = True
 
         # Only rollouts that remained active through the full horizon have
         # a complete Bolza cost. Pruned prefixes are not trajectories and must

@@ -1261,6 +1261,11 @@ class SemiLagrangianFOMCertificate:
                 )
                 lower = raw_lower if np.isfinite(raw_lower) else None
 
+            coarse_lower = lower
+            certified_lower = self._epsilon_final_cell_lowers.get(
+                cell, coarse_lower
+            )
+            refined_in_certificate = cell in self._epsilon_refined_cell_set
             corner_indices = list(self._cell_corner_indices(cell))
             touches_halo = any(
                 self._obstacle_halo_mask[index] for index in corner_indices
@@ -1288,17 +1293,23 @@ class SemiLagrangianFOMCertificate:
                     "cell": list(cell),
                     "is_center": cell == center,
                     "is_reported_worst_cell": cell == self._epsilon_worst_cell,
+                    "is_coarse_worst_cell": cell == self._epsilon_coarse_worst_cell,
                     "lower": lo.tolist(),
                     "upper": hi.tolist(),
                     "boundary_distance_cells": boundary_distance,
                     "touches_obstacle_halo": bool(touches_halo),
                     "fully_inadmissible": fully_blocked,
                     "included_in_slack_gate": bool(
-                        not fully_blocked and lower is not None
+                        not fully_blocked and certified_lower is not None
                     ),
-                    "slack_lower_bound": lower,
+                    "coarse_slack_lower_bound": coarse_lower,
+                    "slack_lower_bound": certified_lower,
+                    "refined_in_certificate": refined_in_certificate,
                     "slack_components": slack_components,
-                    "violation": max(0.0, -lower) if lower is not None else None,
+                    "violation": (
+                        max(0.0, -certified_lower)
+                        if certified_lower is not None else None
+                    ),
                 }
             )
         diagnostics.sort(

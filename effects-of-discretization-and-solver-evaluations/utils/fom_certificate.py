@@ -525,7 +525,16 @@ class SemiLagrangianFOMCertificate:
                 candidate[finite_both], previous[finite_both]
             )
         candidate[~admissible] = np.inf
-        return self._apply_safe_domain(candidate)
+        updated = self._apply_safe_domain(candidate)
+        if enforce_monotone and self._monotone_start:
+            # Boundary tapering is a projection after the raw Bellman backup.
+            # Preserve the previous certified nodal field if that projection
+            # would otherwise lower a node and violate monotone-start semantics.
+            finite_both = np.isfinite(updated) & np.isfinite(previous)
+            updated[finite_both] = np.maximum(
+                updated[finite_both], previous[finite_both]
+            )
+        return updated
 
     def _has_exact_initial_subsolution(self) -> bool:
         same_terminal_function = (

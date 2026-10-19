@@ -97,8 +97,12 @@ class FOMCertificateProblem:
     controls: Array
     dt: float
     initial_lower_bound: Optional[Callable[[Array], Array]] = None
-    terminal_cost_lipschitz: float = 0.0
+    initial_lower_bound_is_subsolution: bool = False
+    global_value_lower_bound: float = 0.0
+    running_cost_lower_bound: float = 0.0
+    terminal_cost_lipschitz: Optional[float] = None
     terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
+    terminal_cell_lower_bound: Optional[Callable[[Array, Array], float]] = None
     control_lipschitz_bound: Optional[Callable[[Array, "RegularGrid"], float]] = None
     cell_slack_lower_bound: Optional[
         Callable[[Array, "RegularGrid", tuple[int, ...]], float]
@@ -123,8 +127,9 @@ class SemiLagrangianFOMCertificate:
     The Bellman operator is
         T V(x) = inf_u { dt * ell(x,u) + V(x + dt f(x,u)) }.
 
-    State constraints are fail-closed: transitions outside the grid or into an
-    inadmissible state receive +infinity.
+    State constraints are fail-closed. Transitions into inadmissible states
+    are excluded; outside-grid and invalid-cell queries use a declared global
+    value lower bound so an unknown region can never look like +infinity cost.
     """
 
     def __init__(
@@ -146,6 +151,20 @@ class SemiLagrangianFOMCertificate:
         self.iterations = int(iterations)
         if self.iterations < 0:
             raise ValueError("iterations must be non-negative")
+        if not np.isfinite(problem.global_value_lower_bound):
+            raise ValueError("global_value_lower_bound must be finite")
+        if not np.isfinite(problem.running_cost_lower_bound):
+            raise ValueError("running_cost_lower_bound must be finite")
+        if problem.terminal_cost_lipschitz is not None and (
+            not np.isfinite(problem.terminal_cost_lipschitz)
+            or problem.terminal_cost_lipschitz < 0.0
+        ):
+            raise ValueError("terminal_cost_lipschitz must be finite and non-negative")
+
+        self._node_admissible = np.asarray(
+            problem.admissible(self.nodes), dtype=bool
+        ).reshape(self.grid.shape)
+        self._safe_zero_mask = self._make_safe_zero_mask()
 
         initial_fn = (
             problem.initial_lower_bound
@@ -156,7 +175,9 @@ class SemiLagrangianFOMCertificate:
         if initial.size != self.nodes.shape[0] or not np.all(np.isfinite(initial)):
             raise ValueError("initial certificate must be finite at every grid node")
         initial = initial.copy()
-        initial[~np.asarray(problem.admissible(self.nodes), dtype=bool)] = np.inf
+        initial[~self._node_admissible.reshape(-1)] = np.inf
+        if self.iterations > 0:
+            initial = self._apply_safe_domain(initial)
 
         self.values: list[Array] = [initial]
         self._monotone_start = bool(monotone_start)
@@ -166,7 +187,97 @@ class SemiLagrangianFOMCertificate:
         self._bellman_monotone = True
         self._discrete_subsolution = False
 
+    def _make_safe_zero_mask(self) -> Array:
+        """Mask nodes adjacent to unknown/blocked cells and grid boundaries.
+
+        The interpolant falls back to the declared global lower bound in any
+        cell touching a non-finite node. Setting all admissible corners of
+        those cells to that same lower bound prevents an upward jump at cell
+        boundaries.
+        """
+        shape = self.grid.shape
+        dim = len(shape)
+        invalid = ~self._node_admissible
+        halo = np.zeros(shape, dtype=bool)
+
+        for index in np.ndindex(shape):
+            if not invalid[index]:
+                continue
+            for offsets in product((-1, 0, 1), repeat=dim):
+                neighbor = []
+                inside = True
+                for axis, offset in enumerate(offsets):
+                    j = index[axis] + offset
+                    if axis in self.grid.periodic_axes:
+                        j %= shape[axis]
+                    elif j < 0 or j >= shape[axis]:
+                        inside = False
+                        break
+                    neighbor.append(j)
+                if inside:
+                    halo[tuple(neighbor)] = True
+
+        for axis in range(dim):
+            if axis in self.grid.periodic_axes:
+                continue
+            boundary = [slice(None)] * dim
+            boundary[axis] = 0
+            halo[tuple(boundary)] = True
+            boundary[axis] = -1
+            halo[tuple(boundary)] = True
+
+        return halo & self._node_admissible
+
+    def _apply_safe_domain(self, values: Array) -> Array:
+        result = np.asarray(values, dtype=float).reshape(-1).copy()
+        result[~self._node_admissible.reshape(-1)] = np.inf
+        result[self._safe_zero_mask.reshape(-1)] = (
+            self.problem.global_value_lower_bound
+        )
+        return result
+
+    def _cell_corner_indices(self, cell: tuple[int, ...]):
+        for bits in product((0, 1), repeat=len(self.grid.shape)):
+            idx = []
+            for axis, bit in enumerate(bits):
+                j = cell[axis] + bit
+                if axis in self.grid.periodic_axes:
+                    j %= self.grid.shape[axis]
+                idx.append(j)
+            yield tuple(idx)
+
+    def _cell_corner_values(self, values: Array, cell: tuple[int, ...]) -> Array:
+        shaped = np.asarray(values, dtype=float).reshape(self.grid.shape)
+        return np.asarray(
+            [shaped[idx] for idx in self._cell_corner_indices(cell)],
+            dtype=float,
+        )
+
+    def _cell_corner_points(self, cell: tuple[int, ...]) -> Array:
+        h = self.grid.spacing
+        return np.asarray(
+            [
+                [
+                    self.grid.lower[axis] + (cell[axis] + bit) * h[axis]
+                    for axis, bit in enumerate(bits)
+                ]
+                for bits in product((0, 1), repeat=len(self.grid.shape))
+            ],
+            dtype=float,
+        )
+
+    def _cell_bounds(self, cell: tuple[int, ...]) -> tuple[Array, Array]:
+        lo = self.grid.lower + np.asarray(cell, dtype=float) * self.grid.spacing
+        return lo, lo + self.grid.spacing
+
     def _interpolate(self, values: Array, points: Array) -> Array:
+        """Interpolate without renormalizing away non-finite corners.
+
+        Zero-weight non-finite corners are ignored to avoid 0 * inf. If any
+        positive-weight corner is non-finite, the query falls back to the
+        declared global value lower bound instead of dropping that corner and
+        renormalizing the remaining weights.
+        """
         points = np.asarray(points, dtype=float)
         if points.ndim == 1:
             points = points[None, :]
@@ -177,8 +288,8 @@ class SemiLagrangianFOMCertificate:
         lo = self.grid.lower
         hi = self.grid.upper
         h = self.grid.spacing
-        valid = np.ones(n, dtype=bool)
         coords = points.copy()
+        valid = np.all(np.isfinite(coords), axis=1)
 
         for axis in range(dim):
             if axis in self.grid.periodic_axes:
@@ -187,7 +298,7 @@ class SemiLagrangianFOMCertificate:
             else:
                 valid &= (coords[:, axis] >= lo[axis]) & (coords[:, axis] <= hi[axis])
 
-        out = np.full(n, np.inf, dtype=float)
+        out = np.full(n, self.problem.global_value_lower_bound, dtype=float)
         if not np.any(valid):
             return out
 
@@ -208,7 +319,7 @@ class SemiLagrangianFOMCertificate:
                 frac[:, axis] = np.clip(q - i0, 0.0, 1.0)
 
         result = np.zeros(p.shape[0], dtype=float)
-        weight_sum = np.zeros(p.shape[0], dtype=float)
+        invalid_cell = np.zeros(p.shape[0], dtype=bool)
         for corner_bits in product((0, 1), repeat=dim):
             weight = np.ones(p.shape[0], dtype=float)
             idx = []
@@ -222,21 +333,24 @@ class SemiLagrangianFOMCertificate:
                 idx.append(j)
             flat = np.ravel_multi_index(tuple(idx), self.grid.shape)
             corner_val = values[flat]
-            finite = np.isfinite(corner_val) & (weight > 0.0)
+            positive = weight > 0.0
+            invalid_cell |= positive & ~np.isfinite(corner_val)
+            finite = positive & np.isfinite(corner_val)
             result[finite] += weight[finite] * corner_val[finite]
-            weight_sum[finite] += weight[finite]
 
-        has_finite = weight_sum > 0.0
-        result[has_finite] /= weight_sum[has_finite]
-        result[~has_finite] = np.inf
+        result[invalid_cell] = self.problem.global_value_lower_bound
         out[valid] = result
         return out
 
     def _bellman_backup(
-        self, previous: Array, *, enforce_monotone: bool = True
+        self,
+        previous: Array,
+        *,
+        enforce_monotone: bool = True,
+        apply_control_correction: bool = True,
     ) -> Array:
         nodes = self.nodes
-        admissible = np.asarray(self.problem.admissible(nodes), dtype=bool)
+        admissible = self._node_admissible.reshape(-1)
         candidate = np.full(nodes.shape[0], np.inf, dtype=float)
 
         for control in np.asarray(self.problem.controls):
@@ -264,23 +378,40 @@ class SemiLagrangianFOMCertificate:
                     self.problem.dt * stage[feasible] + next_value[feasible],
                 )
 
-        # A finite control grid is an approximation of the continuous infimum.
-        # For a scalar control, subtract a Lipschitz interpolation error before
-        # accepting the Bellman backup. This is essential for a lower-bound
-        # certificate: min over a control subset is otherwise an upper bound.
-        if self.problem.control_lipschitz_bound is not None:
-            L_u = float(
-                self.problem.control_lipschitz_bound(
-                    previous, self.grid
-                )
-            )
-            controls_flat = np.asarray(self.problem.controls, dtype=float).reshape(-1)
-            if controls_flat.size > 1:
-                spacing = float(np.max(np.diff(np.sort(controls_flat))))
-                candidate[np.isfinite(candidate)] -= 0.5 * L_u * spacing
-                candidate[np.isfinite(candidate)] = np.maximum(
-                    candidate[np.isfinite(candidate)], 0.0
-                )
+        # A finite control grid approximates the continuous control infimum
+        # from above. Subtract a Lipschitz covering error before using it as a
+        # lower approximation. If the bound is unavailable, fail conservatively.
+        if apply_control_correction and self.problem.control_lipschitz_bound is not None:
+            finite_candidate = np.isfinite(candidate)
+            if np.any(finite_candidate):
+                controls_array = np.asarray(self.problem.controls, dtype=float)
+                if controls_array.ndim == 1:
+                    scalar_controls = controls_array.reshape(-1)
+                elif controls_array.ndim == 2 and controls_array.shape[1] == 1:
+                    scalar_controls = controls_array[:, 0]
+                else:
+                    scalar_controls = np.asarray([], dtype=float)
+
+                unique_controls = np.unique(scalar_controls)
+                if unique_controls.size < 2:
+                    candidate[finite_candidate] = (
+                        self.problem.global_value_lower_bound
+                    )
+                else:
+                    L_u = float(
+                        self.problem.control_lipschitz_bound(previous, self.grid)
+                    )
+                    if not np.isfinite(L_u) or L_u < 0.0:
+                        candidate[finite_candidate] = (
+                            self.problem.global_value_lower_bound
+                        )
+                    else:
+                        spacing = float(np.max(np.diff(unique_controls)))
+                        candidate[finite_candidate] -= 0.5 * L_u * spacing
+                        candidate[finite_candidate] = np.maximum(
+                            candidate[finite_candidate],
+                            self.problem.global_value_lower_bound,
+                        )
 
         if enforce_monotone and self._monotone_start:
             finite_both = np.isfinite(candidate) & np.isfinite(previous)
@@ -288,73 +419,89 @@ class SemiLagrangianFOMCertificate:
                 candidate[finite_both], previous[finite_both]
             )
         candidate[~admissible] = np.inf
-        return candidate
+        return self._apply_safe_domain(candidate)
+
+    def _has_exact_initial_subsolution(self) -> bool:
+        same_terminal_function = (
+            self.problem.initial_lower_bound is None
+            or self.problem.initial_lower_bound is self.problem.terminal_cost
+        )
+        return bool(
+            self.problem.initial_lower_bound_is_subsolution
+            and same_terminal_function
+        )
+
+    def _terminal_cell_cost_lower_bound(
+        self, lo: Array, hi: Array, cell: tuple[int, ...]
+    ) -> float:
+        if self.problem.terminal_cell_lower_bound is not None:
+            return float(self.problem.terminal_cell_lower_bound(lo, hi))
+        lipschitz = self.problem.terminal_cost_lipschitz
+        if lipschitz is None or not np.isfinite(lipschitz):
+            return -np.inf
+        corner_costs = np.asarray(
+            self.problem.terminal_cost(self._cell_corner_points(cell)),
+            dtype=float,
+        ).reshape(-1)
+        if corner_costs.size == 0 or not np.all(np.isfinite(corner_costs)):
+            return -np.inf
+        return float(np.min(corner_costs) - lipschitz * self.grid.cell_diameter)
 
     def _estimate_terminal_error(self, values: Array) -> float:
-        # K=0 uses the exact terminal warm start itself, so the terminal
-        # inequality is exact by construction.
-        if self.iterations == 0:
+        # The analytic radial warm start is both the terminal cost and a known
+        # continuous HJB subsolution in the paper benchmark.
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
             return 0.0
+        if self.problem.terminal_cell_intersects is None:
+            return np.inf
 
-        admissible = np.asarray(self.problem.admissible(self.nodes), dtype=bool)
-        if not np.any(admissible):
-            return 0.0
+        admissible = self._node_admissible.reshape(-1)
+        in_target = np.asarray(self.problem.terminal_set(self.nodes), dtype=bool)
+        target_nodes = admissible & in_target
+        upper = 0.0
+        if np.any(target_nodes):
+            target_values = values[target_nodes]
+            target_costs = np.asarray(
+                self.problem.terminal_cost(self.nodes[target_nodes]), dtype=float
+            ).reshape(-1)
+            if (
+                not np.all(np.isfinite(target_values))
+                or not np.all(np.isfinite(target_costs))
+            ):
+                return np.inf
+            upper = max(upper, float(np.max(target_values - target_costs)))
 
-        target_g = np.asarray(
-            self.problem.terminal_cost(self.nodes[admissible]), dtype=float
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
         )
-        diff = values[admissible] - target_g
-        finite = np.isfinite(diff)
-        if not np.any(finite):
-            return 0.0
-        nodal = float(np.max(np.maximum(diff[finite], 0.0)))
+        for cell in np.ndindex(cell_shape):
+            lo, hi = self._cell_bounds(cell)
+            if not self.problem.terminal_cell_intersects(lo, hi):
+                continue
 
-        # For the paper benchmark g=v_rad is exactly zero on X_T. In that
-        # special case, bound the continuous maximum by the largest finite
-        # multilinear corner value of every cell intersecting X_T. This avoids
-        # pretending that target-node sampling is a global terminal proof.
-        if np.max(np.abs(target_g)) <= 1e-12:
-            h = self.grid.spacing
-            cell_shape = tuple(
-                n if axis in self.grid.periodic_axes else n - 1
-                for axis, n in enumerate(self.grid.shape)
-            )
-            upper = nodal
-            v = values.reshape(self.grid.shape)
-            for cell in np.ndindex(cell_shape):
-                lo = np.array(
-                    [self.grid.lower[a] + cell[a] * h[a]
-                     for a in range(len(self.grid.shape))],
-                    dtype=float,
-                )
-                hi = lo + h
-                if self.problem.terminal_cell_intersects is not None:
-                    intersects = self.problem.terminal_cell_intersects(lo, hi)
-                else:
-                    intersects = bool(
-                        self.problem.terminal_set(((lo + hi) * 0.5)[None, :])[0]
-                    )
-                if not intersects:
-                    continue
-                corners = []
-                for bits in product((0, 1), repeat=len(self.grid.shape)):
-                    idx = []
-                    for axis, bit in enumerate(bits):
-                        n = self.grid.shape[axis]
-                        j = cell[axis] + bit
-                        if axis in self.grid.periodic_axes:
-                            j %= n
-                        else:
-                            j = min(j, n - 1)
-                        idx.append(j)
-                    val = v[tuple(idx)]
-                    if np.isfinite(val):
-                        corners.append(float(val))
-                if corners:
-                    upper = max(upper, max(corners))
-            return float(max(0.0, upper))
+            corners = self._cell_corner_values(values, cell)
+            if np.all(np.isfinite(corners)):
+                value_upper = float(np.max(corners))
+            else:
+                finite_corners = corners[np.isfinite(corners)]
+                if finite_corners.size == 0:
+                    return np.inf
+                if not np.allclose(
+                    finite_corners,
+                    self.problem.global_value_lower_bound,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    return np.inf
+                value_upper = float(self.problem.global_value_lower_bound)
 
-        return nodal + self.problem.terminal_cost_lipschitz * self.grid.cell_diameter
+            terminal_lower = self._terminal_cell_cost_lower_bound(lo, hi, cell)
+            if not np.isfinite(terminal_lower):
+                return np.inf
+            upper = max(upper, value_upper - terminal_lower)
+
+        return float(max(0.0, upper))
 
     def _gradient_bounds_by_cell(self, values: Array, cell: tuple[int, ...]):
         dim = len(self.grid.shape)
@@ -583,23 +730,42 @@ class SemiLagrangianFOMCertificate:
         return float(position_term + control_lower)
 
     def _estimate_slack_error(self, values: Array) -> float:
-        if self.iterations == 0:
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
             return 0.0
-        if self.problem.cell_slack_lower_bound is not None:
-            cell_shape = tuple(
-                n if axis in self.grid.periodic_axes else n - 1
-                for axis, n in enumerate(self.grid.shape)
-            )
-            worst = 0.0
-            for cell in np.ndindex(cell_shape):
+        # Nodal finite differences are not a continuous HJB-slack certificate.
+        # Without a cellwise one-sided bound, disable pruning for this problem.
+        if self.problem.cell_slack_lower_bound is None:
+            return np.inf
+
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
+        )
+        worst = 0.0
+        for cell in np.ndindex(cell_shape):
+            corners = self._cell_corner_values(values, cell)
+            if not np.all(np.isfinite(corners)):
+                finite_corners = corners[np.isfinite(corners)]
+                if finite_corners.size == 0:
+                    return np.inf
+                if not np.allclose(
+                    finite_corners,
+                    self.problem.global_value_lower_bound,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    return np.inf
+                # In this cell the interpolant is the global lower-bound
+                # constant, so its slack is bounded by the declared inf ell.
+                lower = float(self.problem.running_cost_lower_bound)
+            else:
                 lower = float(
                     self.problem.cell_slack_lower_bound(values, self.grid, cell)
                 )
-                if np.isfinite(lower):
-                    worst = max(worst, -lower)
-            return float(max(0.0, worst))
-
-        return self._generic_slack_error(values)
+            if not np.isfinite(lower):
+                return np.inf
+            worst = max(worst, -lower)
+        return float(max(0.0, worst))
 
     def _generic_slack_error(self, values: Array) -> float:
         nodes = self.nodes
@@ -646,11 +812,22 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_terminal = self._estimate_terminal_error(selected)
         self._epsilon = self._estimate_slack_error(selected)
 
-        backup = self._bellman_backup(selected, enforce_monotone=False)
-        finite = np.isfinite(selected) & np.isfinite(backup)
-        self._discrete_subsolution = bool(
-            np.all(backup[finite] >= selected[finite] - 1e-9)
-        ) if np.any(finite) else False
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
+            self._discrete_subsolution = True
+        else:
+            backup = self._bellman_backup(
+                selected,
+                enforce_monotone=False,
+                apply_control_correction=False,
+            )
+            finite = self._node_admissible.reshape(-1) & np.isfinite(selected)
+            self._discrete_subsolution = bool(
+                np.any(finite)
+                and np.all(
+                    np.isfinite(backup[finite])
+                    & (backup[finite] >= selected[finite] - 1e-9)
+                )
+            )
         self._built = True
 
         finite_values = selected[np.isfinite(selected)]
@@ -683,17 +860,35 @@ class SemiLagrangianFOMCertificate:
     def value(self, state: Sequence[float]) -> float:
         if not self._built:
             raise RuntimeError("build() must be called before querying a certificate")
-        return float(
-            self._interpolate(self.values[-1], np.asarray(state, dtype=float))[0]
-        )
+        point = np.asarray(state, dtype=float).reshape(-1)
+        if point.size != len(self.grid.shape):
+            raise ValueError("state dimension does not match certificate grid")
+        if not bool(self.problem.admissible(point[None, :])[0]):
+            return np.inf
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
+            initial_fn = (
+                self.problem.initial_lower_bound
+                if self.problem.initial_lower_bound is not None
+                else self.problem.terminal_cost
+            )
+            value = np.asarray(initial_fn(point[None, :]), dtype=float).reshape(-1)
+            return float(value[0]) if value.size else -np.inf
+        return float(self._interpolate(self.values[-1], point)[0])
 
     def corrected_lower_bound(
         self, state: Sequence[float], remaining_time: float
     ) -> float:
         if remaining_time < 0.0:
             raise ValueError("remaining_time must be non-negative")
+        value = self.value(state)
+        # Non-finite means no usable certificate value, never an infinite
+        # lower bound. Disable pruning for such a query.
+        if not np.isfinite(value):
+            return -np.inf
+        if not np.isfinite(self.epsilon) or not np.isfinite(self.epsilon_terminal):
+            return -np.inf
         return (
-            self.value(state)
+            value
             - self.epsilon * float(remaining_time)
             - self.epsilon_terminal
         )
@@ -716,12 +911,12 @@ def radial_terminal_cost(
     q_position: float,
     forward_speed: float,
 ) -> Array:
-    """Paper Eq. (radial warm start): integral of q_p(d-v_bar t)^2."""
+    """Paper Eq. (24): integrate q_p d(t)^2 until reaching radius rho."""
     p = np.asarray(position, dtype=float)
     goal = np.asarray(goal, dtype=float)
     d = np.linalg.norm(p[..., :2] - goal[:2], axis=-1)
-    exterior = np.maximum(d - goal_radius, 0.0)
-    return q_position * exterior**3 / (3.0 * forward_speed)
+    exterior_cube = np.maximum(d**3 - goal_radius**3, 0.0)
+    return q_position * exterior_cube / (3.0 * forward_speed)
 
 
 def make_paper_unicycle_problem(
@@ -795,19 +990,34 @@ def make_paper_unicycle_problem(
 
     def terminal_cell_intersects(lo: Array, hi: Array) -> bool:
         closest = np.clip(goal[:2], lo[:2], hi[:2])
-        return bool(np.linalg.norm(closest - goal[:2]) <= goal_radius)
+        if np.linalg.norm(closest - goal[:2]) > goal_radius:
+            return False
+        # Cells wholly contained in one obstacle contain no admissible terminal
+        # states and do not participate in the terminal-slack maximum.
+        for xmin, xmax, ymin, ymax in obstacles:
+            if (
+                lo[0] >= xmin and hi[0] <= xmax
+                and lo[1] >= ymin and hi[1] <= ymax
+            ):
+                return False
+        return True
+
+    def terminal_cell_lower_bound(lo: Array, hi: Array) -> float:
+        # The terminal cost is exactly zero on the target set.
+        return 0.0
 
     def control_lipschitz_bound(values: Array, grid: RegularGrid) -> float:
-        grad_phi = np.gradient(
-            values.reshape(grid.shape),
-            *grid.spacing,
-            edge_order=1,
-        )[2]
-        max_grad_phi = float(np.nanmax(np.abs(grad_phi[np.isfinite(grad_phi)])))
+        shaped = np.asarray(values, dtype=float).reshape(grid.shape)
+        next_heading = np.roll(shaped, -1, axis=2)
+        finite_edges = np.isfinite(shaped) & np.isfinite(next_heading)
+        if not np.any(finite_edges):
+            return np.inf
+        edge_slopes = np.abs(next_heading - shaped) / grid.spacing[2]
+        max_grad_phi = float(np.max(edge_slopes[finite_edges]))
         max_u = max(abs(control_min), abs(control_max))
-        # d/du V(x + dt f(x,u)) = dt * V_phi for the constant-speed
-        # unicycle, while d/du (r_u u^2) = 2 r_u u.
-        return dt * max_grad_phi + 2.0 * r_control * max_u
+        # d/du [dt*ell(x,u) + V(x + dt*f(x,u))]
+        # is bounded by dt*(2*r_u*|u| + |dV/dphi|).
+        return dt * (max_grad_phi + 2.0 * r_control * max_u)
 
     def cell_slack_lower_bound(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
@@ -914,8 +1124,12 @@ def make_paper_unicycle_problem(
         controls=controls,
         dt=dt,
         initial_lower_bound=terminal_cost,
-        terminal_cost_lipschitz=0.0,
+        initial_lower_bound_is_subsolution=True,
+        global_value_lower_bound=0.0,
+        running_cost_lower_bound=0.0,
+        terminal_cost_lipschitz=None,
         terminal_cell_intersects=terminal_cell_intersects,
+        terminal_cell_lower_bound=terminal_cell_lower_bound,
         control_lipschitz_bound=control_lipschitz_bound,
         cell_slack_lower_bound=cell_slack_lower_bound,
     )

@@ -84,6 +84,34 @@ def test_certified_radial_extension_anchors_boundary_and_outside_queries():
     assert np.isfinite(cert.corrected_lower_bound(outside, 0.5))
 
 
+def test_cell_slack_diagnostics_decompose_bound_without_changing_epsilon():
+    cert = make_small_certificate(iterations=2)
+    cert.build()
+    epsilon_before = cert.epsilon
+
+    rows = cert.cell_slack_neighborhood(center=(4, 4, 2), radius=0)
+    assert len(rows) == 1
+    components = rows[0]["slack_components"]
+    assert components is not None
+
+    coarse = components["coarse"]
+    refined = components["refined"]
+    assert coarse["subcell_count"] == 1
+    assert refined["subcell_count"] == 8
+    assert refined["total_lower"] >= coarse["total_lower"] - 1e-9
+    assert np.isclose(
+        refined["position_cost_lower"]
+        + refined["x_transport_lower"]
+        + refined["y_transport_lower"]
+        + refined["control_lower"],
+        refined["total_lower"],
+        rtol=0.0,
+        atol=1e-10,
+    )
+    assert "worst_subcell_bounds" in refined
+    assert cert.epsilon == epsilon_before
+
+
 def test_refined_cell_slack_bound_is_no_weaker_than_coarse_bound():
     cert = make_small_certificate(iterations=2)
     cert.build()

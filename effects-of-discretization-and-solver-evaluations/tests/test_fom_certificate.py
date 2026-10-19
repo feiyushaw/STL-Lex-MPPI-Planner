@@ -250,6 +250,24 @@ def test_corrected_lower_bound_accounts_for_certificate_errors():
     assert np.isfinite(corrected)
 
 
+def test_terminal_error_covers_soft_terminal_cost_on_full_domain():
+    cert = make_small_certificate(iterations=2)
+    report = cert.build()
+
+    values = cert.values[-1]
+    terminal = cert.problem.terminal_cost(cert.nodes)
+    admissible = cert._node_admissible.reshape(-1)
+    observed_positive_slack = max(
+        0.0,
+        float(np.max(values[admissible] - terminal[admissible])),
+    )
+
+    # The current primal objective charges the radial terminal cost at every
+    # endpoint and does not impose terminal_set as a hard constraint. Thus
+    # epsilon_T must cover the full admissible domain, not only the goal set.
+    assert report.epsilon_terminal >= observed_positive_slack - 1e-10
+
+
 def test_batch_certificate_queries_match_scalar_queries():
     cert = make_small_certificate(
         iterations=2,

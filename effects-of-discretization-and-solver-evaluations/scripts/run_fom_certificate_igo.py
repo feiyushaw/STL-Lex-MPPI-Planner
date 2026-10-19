@@ -220,6 +220,8 @@ def main() -> None:
                 "prefix_query_batch_seconds": prefix_query_batch_seconds,
                 "prefix_query_speedup": prefix_query_speedup,
                 "epsilon": report.epsilon,
+                "epsilon_coarse": float(certificate._epsilon_coarse),
+                "epsilon_refined_cells": int(certificate._epsilon_refined_cells),
                 "epsilon_terminal": report.epsilon_terminal,
                 "epsilon_worst_cell": (
                     list(report.epsilon_worst_cell)

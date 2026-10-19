@@ -596,6 +596,41 @@ class SemiLagrangianFOMCertificate:
         in_target = np.asarray(self.problem.terminal_set(self.nodes), dtype=bool)
         target_nodes = admissible & in_target
         upper = 0.0
+
+        if self.problem.outside_domain_lower_bound is not None:
+            # The interpolated certificate is terminal_cost plus the
+            # multilinear interpolation of nodal residuals. Since the
+            # extension is exactly terminal_cost, terminal mismatch is just
+            # the residual, including on cells adjacent to blocked nodes.
+            effective_values = np.where(
+                np.isfinite(values),
+                values,
+                self.problem.global_value_lower_bound,
+            )
+            baseline = self._evaluate_outside_domain_lower_bound(self.nodes)
+            residual = effective_values - baseline
+            if np.any(target_nodes):
+                upper = max(upper, float(np.max(residual[target_nodes])))
+
+            cell_shape = tuple(
+                n if axis in self.grid.periodic_axes else n - 1
+                for axis, n in enumerate(self.grid.shape)
+            )
+            for cell in np.ndindex(cell_shape):
+                lo, hi = self._cell_bounds(cell)
+                if not self.problem.terminal_cell_intersects(lo, hi):
+                    continue
+                if (
+                    self.problem.cell_is_fully_inadmissible is not None
+                    and self.problem.cell_is_fully_inadmissible(lo, hi)
+                ):
+                    continue
+                corners = self._cell_corner_values(residual, cell)
+                if not np.all(np.isfinite(corners)):
+                    return np.inf
+                upper = max(upper, float(np.max(corners)))
+            return float(max(0.0, upper))
+
         if np.any(target_nodes):
             target_values = values[target_nodes]
             target_costs = np.asarray(
@@ -655,7 +690,28 @@ class SemiLagrangianFOMCertificate:
         worst = 0.0
         for cell in np.ndindex(cell_shape):
             corners = self._cell_corner_values(values, cell)
-            if not np.all(np.isfinite(corners)):
+            if self.problem.outside_domain_lower_bound is not None:
+                lo, hi = self._cell_bounds(cell)
+                if (
+                    self.problem.cell_is_fully_inadmissible is not None
+                    and self.problem.cell_is_fully_inadmissible(lo, hi)
+                ):
+                    continue
+                # Replace blocked-node sentinels with the declared global
+                # lower bound. The interpolant remains continuous and the
+                # cellwise callback bounds its actual residual-plus-radial
+                # gradient on every cell that intersects the admissible set.
+                effective_values = np.where(
+                    np.isfinite(values),
+                    values,
+                    self.problem.global_value_lower_bound,
+                )
+                lower = float(
+                    self.problem.cell_slack_lower_bound(
+                        effective_values, self.grid, cell
+                    )
+                )
+            elif not np.all(np.isfinite(corners)):
                 finite_corners = corners[np.isfinite(corners)]
                 if finite_corners.size == 0:
                     lo, hi = self._cell_bounds(cell)
@@ -672,8 +728,6 @@ class SemiLagrangianFOMCertificate:
                     atol=1e-12,
                 ):
                     return np.inf
-                # In this cell the interpolant is the global lower-bound
-                # constant, so its slack is bounded by the declared inf ell.
                 lower = float(self.problem.running_cost_lower_bound)
             else:
                 lower = float(

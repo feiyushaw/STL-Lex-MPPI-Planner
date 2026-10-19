@@ -12,7 +12,10 @@ from utils.fom_certificate import (
 
 
 def make_small_certificate(
-    iterations=0, obstacles=(), refinement_budget=256
+    iterations=0,
+    obstacles=(),
+    refinement_budget=256,
+    deep_refinement_budget=8,
 ):
     problem = make_paper_unicycle_problem(
         goal=(0.0, 0.0),
@@ -37,6 +40,7 @@ def make_small_certificate(
         grid,
         iterations=iterations,
         refinement_budget=refinement_budget,
+        deep_refinement_budget=deep_refinement_budget,
     )
     return cert
 
@@ -148,12 +152,15 @@ def test_global_epsilon_matches_the_final_bounds_used_for_pruning():
     if row["refined_in_certificate"]:
         components = row["slack_components"]
         assert components is not None
+        expected_bounds = [
+            row["coarse_slack_lower_bound"],
+            components["refined"]["total_lower"],
+        ]
+        if row["deep_refined_in_certificate"]:
+            expected_bounds.append(components["deep"]["total_lower"])
         assert np.isclose(
             row["slack_lower_bound"],
-            max(
-                row["coarse_slack_lower_bound"],
-                components["refined"]["total_lower"],
-            ),
+            max(expected_bounds),
             atol=1e-12,
         )
     else:
@@ -196,6 +203,12 @@ def test_refinement_budget_must_be_non_negative():
         SemiLagrangianFOMCertificate(
             problem, grid, iterations=2, refinement_budget=-1
         )
+    with pytest.raises(
+        ValueError, match="deep_refinement_budget must be non-negative"
+    ):
+        SemiLagrangianFOMCertificate(
+            problem, grid, iterations=2, deep_refinement_budget=-1
+        )
 
 
 def test_zero_refinement_budget_reports_unresolved_coarse_worst_cell():
@@ -228,11 +241,35 @@ def test_refined_cell_slack_bound_is_no_weaker_than_coarse_bound():
     refined = cert.problem.cell_slack_lower_bound_refined(
         values, cert.grid, cell
     )
+    deep = cert.problem.cell_slack_lower_bound_deep(
+        values, cert.grid, cell
+    )
     assert np.isfinite(coarse)
     assert np.isfinite(refined)
-    # Subdivision tightens interval enclosures. The refined result remains a
-    # lower bound on the whole parent cell and must not be weaker.
+    assert np.isfinite(deep)
+    # Each level bounds the same parent-cell infimum. More subdivision tightens
+    # the interval enclosure without weakening the certified lower bound.
     assert refined >= coarse - 1e-9
+    assert deep >= refined - 1e-9
+
+
+def test_deep_refinement_budget_is_separate_and_audited():
+    cert = make_small_certificate(
+        iterations=2,
+        refinement_budget=64,
+        deep_refinement_budget=2,
+    )
+    cert.build()
+
+    assert len(cert._epsilon_deep_refined_cell_set) <= 2
+    assert cert._epsilon_deep_refined_cell_set <= cert._epsilon_refined_cell_set
+    assert cert._epsilon_deep_refined_cells == len(
+        cert._epsilon_deep_refined_cell_set
+    )
+    for cell in cert._epsilon_deep_refined_cell_set:
+        assert cert._epsilon_final_cell_lowers[cell] >= (
+            cert._epsilon_coarse_cell_lowers[cell] - 1e-9
+        )
 
 
 def test_radial_extension_uses_nearest_residual_at_blocked_nodes():

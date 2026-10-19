@@ -68,9 +68,12 @@ def test_certified_radial_extension_anchors_boundary_and_outside_queries():
     values = cert.values[-1].reshape(cert.grid.shape)
     radial = cert.problem.terminal_cost(cert.nodes).reshape(cert.grid.shape)
 
-    # The outer two node layers use the declared global subsolution, not zero.
-    assert np.allclose(values[:2, :, :], radial[:2, :, :])
-    assert np.allclose(values[-2:, :, :], radial[-2:, :, :])
+    # The outer boundary matches the analytic extension exactly. The
+    # residual is smoothly tapered over four node layers instead of forcing
+    # the first interior cell to jump from zero to a large radial value.
+    assert np.allclose(values[0, :, :], radial[0, :, :])
+    assert np.allclose(values[-1, :, :], radial[-1, :, :])
+    assert np.all(values[1, :, :] >= radial[1, :, :] - 1e-12)
     assert not np.any(cert._safe_zero_mask[0, :, :])
 
     outside = np.array([2.5, 0.0, 0.0])

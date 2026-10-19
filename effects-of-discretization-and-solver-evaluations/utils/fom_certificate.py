@@ -166,19 +166,31 @@ class SemiLagrangianFOMCertificate:
         ):
             raise ValueError("terminal_cost_lipschitz must be finite and non-negative")
 
-        if problem.outside_domain_lower_bound is not None and not (
-            problem.outside_domain_is_subsolution
-        ):
-            raise ValueError(
-                "outside_domain_lower_bound requires an explicit "
-                "outside_domain_is_subsolution declaration"
-            )
+        if problem.outside_domain_lower_bound is not None:
+            if not problem.outside_domain_is_subsolution:
+                raise ValueError(
+                    "outside_domain_lower_bound requires an explicit "
+                    "outside_domain_is_subsolution declaration"
+                )
+            if problem.outside_domain_lower_bound is not problem.terminal_cost:
+                raise ValueError(
+                    "the current continuous extension requires the outside "
+                    "lower bound to be the exact terminal_cost callable"
+                )
 
         self._node_admissible = np.asarray(
             problem.admissible(self.nodes), dtype=bool
         ).reshape(self.grid.shape)
         self._safe_zero_mask = self._make_safe_zero_mask()
-        self._boundary_anchor_mask = self._make_boundary_anchor_mask()
+        self._boundary_extension_weights = self._make_boundary_extension_weights()
+        boundary_surface = self._boundary_extension_weights == 0.0
+        if problem.outside_domain_lower_bound is not None and np.any(
+            self._safe_zero_mask & boundary_surface
+        ):
+            raise ValueError(
+                "blocked-state halo intersects the outer grid boundary; "
+                "expand the grid before using the radial extension"
+            )
 
         initial_fn = (
             problem.initial_lower_bound
@@ -243,23 +255,29 @@ class SemiLagrangianFOMCertificate:
 
         return halo & self._node_admissible
 
-    def _make_boundary_anchor_mask(self) -> Array:
-        """Anchor the outer two node layers to the certified extension."""
-        shape = self.grid.shape
-        mask = np.zeros(shape, dtype=bool)
-        if self.problem.outside_domain_lower_bound is None:
-            return mask
+    def _make_boundary_extension_weights(self) -> Array:
+        """Smoothly taper Bellman updates to the certified boundary extension.
 
+        The weight is zero on the outer boundary and reaches one four grid
+        layers inward. A cubic smoothstep avoids a one-cell jump in the
+        residual while keeping the entire interpolation domain certified.
+        """
+        shape = self.grid.shape
+        if self.problem.outside_domain_lower_bound is None:
+            return np.ones(shape, dtype=float)
+
+        distance = np.full(shape, np.inf, dtype=float)
         for axis, size in enumerate(shape):
             if axis in self.grid.periodic_axes:
                 continue
-            low = [slice(None)] * len(shape)
-            low[axis] = slice(0, min(2, size))
-            mask[tuple(low)] = True
-            high = [slice(None)] * len(shape)
-            high[axis] = slice(max(0, size - 2), size)
-            mask[tuple(high)] = True
-        return mask & self._node_admissible
+            axis_index = np.arange(size, dtype=float)
+            axis_distance = np.minimum(axis_index, size - 1 - axis_index)
+            reshape = [1] * len(shape)
+            reshape[axis] = size
+            distance = np.minimum(distance, axis_distance.reshape(reshape))
+
+        t = np.clip(distance / 4.0, 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
 
     def _evaluate_outside_domain_lower_bound(self, points: Array) -> Array:
         points = np.asarray(points, dtype=float)
@@ -280,10 +298,15 @@ class SemiLagrangianFOMCertificate:
 
     def _apply_safe_domain(self, values: Array) -> Array:
         result = np.asarray(values, dtype=float).reshape(-1).copy()
-        if np.any(self._boundary_anchor_mask):
-            anchor = self._boundary_anchor_mask.reshape(-1)
-            result[anchor] = self._evaluate_outside_domain_lower_bound(
-                self.nodes[anchor]
+        if self.problem.outside_domain_lower_bound is not None:
+            baseline = self._evaluate_outside_domain_lower_bound(self.nodes)
+            weights = self._boundary_extension_weights.reshape(-1)
+            finite_admissible = (
+                self._node_admissible.reshape(-1) & np.isfinite(result)
+            )
+            tapered = finite_admissible & (weights < 1.0)
+            result[tapered] = baseline[tapered] + weights[tapered] * (
+                result[tapered] - baseline[tapered]
             )
         result[self._safe_zero_mask.reshape(-1)] = (
             self.problem.global_value_lower_bound
@@ -378,6 +401,16 @@ class SemiLagrangianFOMCertificate:
                 lower_idx[:, axis] = i0
                 frac[:, axis] = np.clip(q - i0, 0.0, 1.0)
 
+        baseline_nodes = None
+        interpolation_values = np.asarray(values, dtype=float).reshape(-1)
+        if self.problem.outside_domain_lower_bound is not None:
+            baseline_nodes = self._evaluate_outside_domain_lower_bound(self.nodes)
+            interpolation_values = np.where(
+                np.isfinite(interpolation_values),
+                interpolation_values,
+                self.problem.global_value_lower_bound,
+            ) - baseline_nodes
+
         result = np.zeros(p.shape[0], dtype=float)
         invalid_cell = np.zeros(p.shape[0], dtype=bool)
         for corner_bits in product((0, 1), repeat=dim):
@@ -392,13 +425,21 @@ class SemiLagrangianFOMCertificate:
                     j = np.clip(j, 0, self.grid.shape[axis] - 1)
                 idx.append(j)
             flat = np.ravel_multi_index(tuple(idx), self.grid.shape)
-            corner_val = values[flat]
+            corner_val = interpolation_values[flat]
             positive = weight > 0.0
-            invalid_cell |= positive & ~np.isfinite(corner_val)
-            finite = positive & np.isfinite(corner_val)
-            result[finite] += weight[finite] * corner_val[finite]
+            if baseline_nodes is None:
+                invalid_cell |= positive & ~np.isfinite(corner_val)
+                finite = positive & np.isfinite(corner_val)
+                result[finite] += weight[finite] * corner_val[finite]
+            else:
+                result += weight * corner_val
 
         result[invalid_cell] = self.problem.global_value_lower_bound
+        if baseline_nodes is not None:
+            valid_extension = ~invalid_cell
+            result[valid_extension] += self._evaluate_outside_domain_lower_bound(
+                p[valid_extension]
+            )
         out[valid] = result
         return out
 

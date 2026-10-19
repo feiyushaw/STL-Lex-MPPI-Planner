@@ -55,7 +55,7 @@ For the radial-extension benchmark, the first refinement level subdivides
 selected high-violation cells into 2x2x2 subcells. Derivative intervals are
 recomputed on each subcell from the same trilinear interpolant, while
 radial-gradient and trigonometric intervals are restricted to the subcell. A
-separate, small deep-refinement budget then applies a 4x4x4 enclosure to the
+separate, small deep-refinement budget then applies a 4x4x2 enclosure to the
 highest-impact cells already refined at the first level. The minimum of the
 subcell lower bounds is a lower bound for the parent cell. The estimator first
 records the all-cell coarse epsilon, then adaptively refines near-worst cells
@@ -83,7 +83,7 @@ A built certificate reports:
 - epsilon_refined_cells: number of cells for which the 2x2x2 bound was
   evaluated;
 - epsilon_deep_refined_cells: number of those cells also evaluated with a
-  4x4x4 bound;
+  4x4x2 bound;
 - epsilon_terminal: terminal feasibility tolerance;
 - epsilon_worst_cell: grid-cell index attaining the largest finite slack
   violation, for diagnosing where epsilon originates;
@@ -155,9 +155,14 @@ and `--certificate-refinement-budget`.
 
 A separate deep-refinement stage defaults to 8 cells. It sorts the first-level
 refined cells by their current violation and re-evaluates only the highest-impact
-cells using 4x4x4 subcells. This targets a persistent local bottleneck such as
-the obstacle-corner cell `[4, 11, 3]` without multiplying the work across all
-512 first-level cells. Configure it through
+cells using anisotropic 4x4x2 subcells. The control derivative dV/dphi of the
+trilinear residual varies with x/y inside a parent cell but not with phi; the
+4x4 spatial split therefore targets the dominant control-term interval, while
+the 2-way heading split also tightens trigonometric transport intervals. This
+uses 32 subcells per deep-refined cell rather than 64 for a uniform 4x4x4 split.
+It targets a persistent local bottleneck such as the obstacle-corner cell
+`[4, 11, 3]` without multiplying the work across all 512 first-level cells.
+Configure it through
 `SemiLagrangianFOMCertificate(deep_refinement_budget=...)` or
 `--certificate-deep-refinement-budget`. Both budgets are independently
 audited. A higher first-level budget remains useful for reducing the worst
@@ -172,7 +177,7 @@ violation.
 
 
 For the reported center/worst cell, the diagnostic payload decomposes the
-coarse, 2x2x2-refined, and 4x4x4-deep-refined lower bounds into position-cost,
+coarse, 2x2x2-refined, and 4x4x2-deep-refined lower bounds into position-cost,
 x-transport, y-transport, and control contributions. Each level records its
 worst subcell, physical bounds, and residual/radial/total gradient intervals.
 The summary separately records the worst cell refined at each level and whether

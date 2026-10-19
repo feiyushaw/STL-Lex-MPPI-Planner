@@ -618,23 +618,29 @@ class SemiLagrangianFOMCertificate:
         return float(np.min(corner_costs) - lipschitz * self.grid.cell_diameter)
 
     def _estimate_terminal_error(self, values: Array) -> float:
-        # The analytic radial warm start is both the terminal cost and a known
-        # continuous HJB subsolution in the paper benchmark.
+        """Bound positive terminal slack over the full Bolza terminal domain.
+
+        The primal IGO solver evaluates terminal_cost(x_T) for every
+        admissible terminal state; it does not impose terminal_set as a hard
+        endpoint constraint. Therefore epsilon_terminal must bound
+        sup_X (V - g)_+, not only the mismatch on terminal_set. The latter is
+        valid only for a primal problem whose terminal measure is constrained
+        to that set.
+        """
         if self.iterations == 0 and self._has_exact_initial_subsolution():
             return 0.0
-        if self.problem.terminal_cell_intersects is None:
-            return np.inf
 
-        admissible = self._node_admissible.reshape(-1)
-        in_target = np.asarray(self.problem.terminal_set(self.nodes), dtype=bool)
-        target_nodes = admissible & in_target
         upper = 0.0
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
+        )
 
         if self.problem.outside_domain_lower_bound is not None:
-            # The interpolated certificate is terminal_cost plus the
-            # multilinear interpolation of nodal residuals. Since the
-            # extension is exactly terminal_cost, terminal mismatch is just
-            # the residual, including on cells adjacent to blocked nodes.
+            # In the radial-extension path V = g + multilinear(residual).
+            # The maximum of a multilinear function over a cell is attained
+            # at a corner, so all cells intersecting the admissible domain
+            # must contribute to the global terminal-slack bound.
             effective_values = np.where(
                 np.isfinite(values),
                 values,
@@ -644,17 +650,8 @@ class SemiLagrangianFOMCertificate:
             if baseline is None:
                 return np.inf
             residual = effective_values - baseline
-            if np.any(target_nodes):
-                upper = max(upper, float(np.max(residual[target_nodes])))
-
-            cell_shape = tuple(
-                n if axis in self.grid.periodic_axes else n - 1
-                for axis, n in enumerate(self.grid.shape)
-            )
             for cell in np.ndindex(cell_shape):
                 lo, hi = self._cell_bounds(cell)
-                if not self.problem.terminal_cell_intersects(lo, hi):
-                    continue
                 if (
                     self.problem.cell_is_fully_inadmissible is not None
                     and self.problem.cell_is_fully_inadmissible(lo, hi)
@@ -666,25 +663,16 @@ class SemiLagrangianFOMCertificate:
                 upper = max(upper, float(np.max(corners)))
             return float(max(0.0, upper))
 
-        if np.any(target_nodes):
-            target_values = values[target_nodes]
-            target_costs = np.asarray(
-                self.problem.terminal_cost(self.nodes[target_nodes]), dtype=float
-            ).reshape(-1)
-            if (
-                not np.all(np.isfinite(target_values))
-                or not np.all(np.isfinite(target_costs))
-            ):
-                return np.inf
-            upper = max(upper, float(np.max(target_values - target_costs)))
-
-        cell_shape = tuple(
-            n if axis in self.grid.periodic_axes else n - 1
-            for axis, n in enumerate(self.grid.shape)
-        )
+        # Generic finite-grid path: bound V(x)-g(x) over every cell, using a
+        # conservative upper bound on V and lower bound on g. Restricting this
+        # loop to cells intersecting terminal_set would under-correct the
+        # current soft-terminal-cost objective used by the primal solver.
         for cell in np.ndindex(cell_shape):
             lo, hi = self._cell_bounds(cell)
-            if not self.problem.terminal_cell_intersects(lo, hi):
+            if (
+                self.problem.cell_is_fully_inadmissible is not None
+                and self.problem.cell_is_fully_inadmissible(lo, hi)
+            ):
                 continue
 
             corners = self._cell_corner_values(values, cell)

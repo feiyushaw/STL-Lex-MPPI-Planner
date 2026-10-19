@@ -994,6 +994,10 @@ def make_paper_unicycle_problem(
 
     def control_lipschitz_bound(values: Array, grid: RegularGrid) -> float:
         shaped = np.asarray(values, dtype=float).reshape(grid.shape)
+        if np.any(~np.isfinite(shaped)):
+            shaped = np.where(
+                np.isfinite(shaped), shaped, 0.0
+            )
         next_heading = np.roll(shaped, -1, axis=2)
         finite_edges = np.isfinite(shaped) & np.isfinite(next_heading)
         if not np.any(finite_edges):
@@ -1010,7 +1014,16 @@ def make_paper_unicycle_problem(
     ) -> float:
         """Rigorous lower bound on ell + grad(V) dot f over one grid cell."""
         h = grid.spacing
-        v = values.reshape(grid.shape)
+        v = np.asarray(values, dtype=float).reshape(grid.shape)
+        if np.any(~np.isfinite(v)):
+            v = np.where(np.isfinite(v), v, 0.0)
+        # The continuous field is radial_terminal_cost(x) plus a multilinear
+        # interpolation of nodal residuals. The radial part is independent of
+        # heading, so only residuals contribute to dV/dphi.
+        radial_nodes = radial_terminal_cost(
+            grid.nodes, goal, goal_radius, q_position, forward_speed
+        ).reshape(grid.shape)
+        v = v - radial_nodes
         corner_axes = []
         for axis, i in enumerate(cell):
             n = grid.shape[axis]
@@ -1039,6 +1052,41 @@ def make_paper_unicycle_problem(
                 return np.inf
             grad_bounds.append((min(vals), max(vals)))
 
+        # Add a rigorous interval enclosure for the analytic radial gradient:
+        # grad_p v_rad = (q_position / forward_speed) * d * (p - goal).
+        xlo = grid.lower[0] + cell[0] * h[0]
+        xhi = xlo + h[0]
+        ylo = grid.lower[1] + cell[1] * h[1]
+        yhi = ylo + h[1]
+        dx0, dx1 = xlo - goal[0], xhi - goal[0]
+        dy0, dy1 = ylo - goal[1], yhi - goal[1]
+        dx_min = 0.0 if dx0 <= 0.0 <= dx1 else min(abs(dx0), abs(dx1))
+        dy_min = 0.0 if dy0 <= 0.0 <= dy1 else min(abs(dy0), abs(dy1))
+        d_min = float(np.hypot(dx_min, dy_min))
+        d_max = float(max(
+            np.hypot(dx, dy)
+            for dx in (dx0, dx1)
+            for dy in (dy0, dy1)
+        ))
+
+        def interval_product(a0, a1, b0, b1):
+            products = (a0 * b0, a0 * b1, a1 * b0, a1 * b1)
+            return min(products), max(products)
+
+        radial_scale = q_position / forward_speed
+        rgx0, rgx1 = interval_product(dx0, dx1, d_min, d_max)
+        rgy0, rgy1 = interval_product(dy0, dy1, d_min, d_max)
+        rgx0, rgx1 = radial_scale * rgx0, radial_scale * rgx1
+        rgy0, rgy1 = radial_scale * rgy0, radial_scale * rgy1
+        grad_bounds[0] = (
+            grad_bounds[0][0] + rgx0,
+            grad_bounds[0][1] + rgx1,
+        )
+        grad_bounds[1] = (
+            grad_bounds[1][0] + rgy0,
+            grad_bounds[1][1] + rgy1,
+        )
+
         phi_lo = grid.lower[2] + cell[2] * h[2]
         phi_hi = phi_lo + h[2]
 
@@ -1065,10 +1113,6 @@ def make_paper_unicycle_problem(
         gy0, gy1 = grad_bounds[1]
         gp0, gp1 = grad_bounds[2]
 
-        xlo = grid.lower[0] + cell[0] * h[0]
-        xhi = xlo + h[0]
-        ylo = grid.lower[1] + cell[1] * h[1]
-        yhi = ylo + h[1]
         dx = 0.0 if xlo <= goal[0] <= xhi else min(
             abs(goal[0] - xlo), abs(goal[0] - xhi)
         )

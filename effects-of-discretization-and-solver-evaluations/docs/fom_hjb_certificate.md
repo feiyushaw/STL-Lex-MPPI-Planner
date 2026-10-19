@@ -81,14 +81,17 @@ subsolution and the same function is the terminal cost.
 
 For K > 0, an interpolation cell with a non-finite corner is never repaired by
 renormalizing the remaining corners. In the generic path, a positive-weight
-unavailable corner falls back to the declared global value lower bound. In
-the radial-extension path, blocked nodes use that lower bound as interpolation
-surrogates, while the continuous baseline-plus-residual interpolant is
-explicitly included in the cellwise HJB-slack bound. Admissible nodes adjacent
-to blocked cells remain pinned to the global lower bound. Admissible nodes
-without a usable Bellman successor fall back to the declared radial
-subsolution. Cells proven to lie wholly inside an obstacle are excluded from
-the HJB domain; ambiguous non-finite cells make the error gate infinite.
+unavailable corner falls back to the declared global value lower bound, and
+admissible nodes adjacent to blocked cells are pinned to that bound. In the
+radial-extension path, blocked nodes use the global lower bound as interpolation
+surrogates, while admissible halo nodes retain the tapered Bellman field rather
+than being overwritten with zero. This avoids an artificial residual jump
+between the radial boundary extension and the obstacle halo. The continuous
+baseline-plus-residual interpolant is explicitly included in the cellwise
+HJB-slack bound. Admissible nodes without a usable Bellman successor fall back
+to the declared radial subsolution. Cells proven to lie wholly inside an
+obstacle are excluded from the HJB domain; ambiguous non-finite cells make the
+error gate infinite.
 
 The paper benchmark additionally supplies the analytic radial function as a
 global cost-to-go lower bound and as a continuous HJB subsolution outside the

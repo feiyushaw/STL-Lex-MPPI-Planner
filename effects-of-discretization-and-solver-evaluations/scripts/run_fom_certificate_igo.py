@@ -28,6 +28,48 @@ from utils.fom_certificate import (  # noqa: E402
 from utils.fom_certificate_igo import CertificateGuidedIGOSolver  # noqa: E402
 
 
+def benchmark_prefix_query_batch(
+    certificate,
+    states: np.ndarray,
+    prefix_costs: np.ndarray,
+    remaining_times: np.ndarray,
+    *,
+    repeats: int = 3,
+) -> tuple[float, float, float]:
+    """Measure scalar-vs-batch query latency and verify numerical equivalence."""
+    scalar_result = None
+    batch_result = None
+    scalar_times = []
+    batch_times = []
+    for _ in range(repeats):
+        started = time.perf_counter()
+        scalar_result = np.asarray(
+            [
+                certificate.prefix_bound(float(cost), state, float(remaining))
+                for cost, state, remaining in zip(
+                    prefix_costs, states, remaining_times
+                )
+            ],
+            dtype=float,
+        )
+        scalar_times.append(time.perf_counter() - started)
+
+        started = time.perf_counter()
+        batch_result = certificate.prefix_bound_batch(
+            prefix_costs, states, remaining_times
+        )
+        batch_times.append(time.perf_counter() - started)
+
+    if not np.allclose(
+        scalar_result, batch_result, rtol=1e-10, atol=1e-10
+    ):
+        raise RuntimeError("scalar and batched certificate bounds disagree")
+    scalar_seconds = float(min(scalar_times))
+    batch_seconds = float(min(batch_times))
+    speedup = scalar_seconds / batch_seconds if batch_seconds > 0.0 else float("inf")
+    return scalar_seconds, batch_seconds, speedup
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -46,6 +88,12 @@ def main() -> None:
         metavar=("NX", "NY", "NPHI"),
     )
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--query-benchmark-samples",
+        type=int,
+        default=1000,
+        help="number of states for scalar-vs-batch query timing; set 0 to disable",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -78,6 +126,23 @@ def main() -> None:
         periodic_axes=(2,),
     )
 
+    if args.query_benchmark_samples < 0:
+        parser.error("--query-benchmark-samples must be non-negative")
+    query_states = query_prefix = query_remaining = None
+    if args.query_benchmark_samples:
+        query_rng = np.random.default_rng(args.seed + 10000)
+        query_states = query_rng.uniform(
+            low=grid.lower,
+            high=grid.upper,
+            size=(args.query_benchmark_samples, len(grid.shape)),
+        )
+        query_prefix = query_rng.uniform(
+            0.0, 100.0, size=args.query_benchmark_samples
+        )
+        query_remaining = query_rng.uniform(
+            0.0, 40 * problem.dt, size=args.query_benchmark_samples
+        )
+
     rows = []
     for capacity in args.certificate_iterations:
         certificate = SemiLagrangianFOMCertificate(
@@ -88,6 +153,21 @@ def main() -> None:
         certificate_build_started = time.perf_counter()
         report = certificate.build()
         certificate_build_seconds = time.perf_counter() - certificate_build_started
+        if query_states is not None:
+            (
+                prefix_query_scalar_seconds,
+                prefix_query_batch_seconds,
+                prefix_query_speedup,
+            ) = benchmark_prefix_query_batch(
+                certificate,
+                query_states,
+                query_prefix,
+                query_remaining,
+            )
+        else:
+            prefix_query_scalar_seconds = None
+            prefix_query_batch_seconds = None
+            prefix_query_speedup = None
         worst_cell_neighborhood = (
             certificate.cell_slack_neighborhood(radius=1)
             if report.epsilon_worst_cell is not None
@@ -116,6 +196,9 @@ def main() -> None:
                 "certificate_build_seconds": certificate_build_seconds,
                 "igo_solve_seconds": igo_solve_seconds,
                 "completed_rollouts": solver.evaluated_rollouts_total,
+                "prefix_query_scalar_seconds": prefix_query_scalar_seconds,
+                "prefix_query_batch_seconds": prefix_query_batch_seconds,
+                "prefix_query_speedup": prefix_query_speedup,
                 "epsilon": report.epsilon,
                 "epsilon_terminal": report.epsilon_terminal,
                 "epsilon_worst_cell": (

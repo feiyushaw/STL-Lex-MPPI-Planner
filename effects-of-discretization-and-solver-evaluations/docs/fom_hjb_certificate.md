@@ -139,6 +139,13 @@ the worst slack can be reviewed after a run. It also records `epsilon_coarse`
 and `epsilon_refined_cells`, allowing the local-refinement benefit to be
 measured separately from the Bellman iteration count.
 
+For the reported center/worst cell, the diagnostic payload now decomposes both
+the coarse and refined lower bounds into position-cost, x-transport,
+y-transport, and control contributions. It also records the worst refined
+subcell, its physical bounds, and residual/radial/total gradient intervals.
+This is diagnostic-only: it does not modify epsilon, select extra cells for
+refinement, or alter any prefix bound used for pruning.
+
 ## Batched certificate queries
 
 `value_batch`, `corrected_lower_bound_batch`, and `prefix_bound_batch` are

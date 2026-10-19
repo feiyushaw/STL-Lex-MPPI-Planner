@@ -107,7 +107,8 @@ def test_cell_slack_diagnostics_decompose_bound_without_changing_epsilon():
     assert coarse["subcell_count"] == 1
     assert refined["subcell_count"] == 8
     deep = components["deep"]
-    assert deep["subcell_count"] == 64
+    assert deep["subcell_count"] == 32
+    assert deep["subdivisions_per_axis"] == [4, 4, 2]
     assert refined["total_lower"] >= coarse["total_lower"] - 1e-9
     assert deep["total_lower"] >= refined["total_lower"] - 1e-9
     assert np.isclose(

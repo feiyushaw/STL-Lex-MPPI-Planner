@@ -131,10 +131,11 @@ class SemiLagrangianFOMCertificate:
         T V(x) = inf_u { dt * ell(x,u) + V(x + dt f(x,u)) }.
 
     State constraints are fail-closed. Transitions into inadmissible states
-    are excluded. By default, outside-grid and invalid-cell queries use the
-    declared global value lower bound. A problem may instead supply a global
-    lower-bound extension that is itself a subsolution outside the grid; its
-    values anchor a narrow boundary strip and provide a continuous extension.
+    are excluded. Without a certified extension, outside-grid queries use the
+    declared global value lower bound and cells with unavailable corners fail
+    closed. The paper benchmark supplies a global radial lower-bound
+    subsolution; the interpolant is represented as this baseline plus a
+    multilinear residual, so the extension remains continuous at the boundary.
     """
 
     def __init__(
@@ -351,10 +352,12 @@ class SemiLagrangianFOMCertificate:
     def _interpolate(self, values: Array, points: Array) -> Array:
         """Interpolate without renormalizing away non-finite corners.
 
-        Zero-weight non-finite corners are ignored to avoid 0 * inf. If any
-        positive-weight corner is non-finite, the query falls back to the
-        declared global value lower bound instead of dropping that corner and
-        renormalizing the remaining weights.
+        In the generic path, zero-weight non-finite corners are ignored and a
+        positive-weight unavailable corner makes the query fall back to the
+        global lower bound. With the certified radial extension, unavailable
+        nodes are replaced by that lower bound for interpolation only; the
+        baseline-plus-residual representation stays continuous and the
+        cellwise slack estimator accounts for the resulting gradients.
         """
         points = np.asarray(points, dtype=float)
         if points.ndim == 1:

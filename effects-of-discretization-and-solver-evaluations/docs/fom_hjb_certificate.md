@@ -144,7 +144,17 @@ of stopping after a fixed number of passes. The default budget is 256 cells,
 with batches capped at 64 cells. Refinement stops when no unrefined cell is
 within 80% of the current maximum violation, or when the budget is exhausted.
 The final `epsilon` is always computed from the final certified bound for
-every cell; unrefined cells retain their coarse bound.
+every cell; unrefined cells retain their coarse bound. The cell budget is
+configurable through `SemiLagrangianFOMCertificate(refinement_budget=...)`
+and the benchmark flag `--certificate-refinement-budget`. The default remains
+256 until a larger-budget capacity sweep demonstrates a worthwhile
+accuracy/runtime trade-off.
+
+The benchmark separately records the worst refined cell and worst unrefined
+cell, with their final violation magnitudes. This distinguishes a true
+unrefined bottleneck from ties where the reported worst-cell index happens to
+refer to an unrefined cell even though a refined cell has the same maximum
+violation.
 
 
 For the reported center/worst cell, the diagnostic payload now decomposes both

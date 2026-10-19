@@ -95,10 +95,14 @@ def test_nonfinite_certificate_query_disables_pruning():
         iterations=1,
         obstacles=((-0.5, 0.5, -0.5, 0.5),),
     )
-    cert.build()
+    report = cert.build()
     blocked = np.array([0.0, 0.0, 0.0])
     assert np.isinf(cert.value(blocked))
     assert cert.corrected_lower_bound(blocked, 1.0) == -np.inf
+    # Fully blocked cells are excluded from the HJB domain; adjacent cells
+    # use the conservative lower-bound extension and retain finite error gates.
+    assert np.isfinite(report.epsilon)
+    assert np.isfinite(report.epsilon_terminal)
 
 
 def test_value_iteration_is_monotone_and_tightens_from_below():

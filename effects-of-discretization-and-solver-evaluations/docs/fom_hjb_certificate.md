@@ -79,14 +79,23 @@ subsolution and the same function is the terminal cost.
 
 For K > 0, an interpolation cell with a non-finite corner is never repaired by
 renormalizing the remaining corners. Such cells use the declared global value
-lower bound, and the admissible nodes adjacent to blocked cells and the outer
-grid boundary are pinned to that same lower bound. Cells proven to lie wholly
-inside an obstacle are excluded from the HJB domain; ambiguous non-finite
-cells make the error gate infinite. Queries without a finite certificate
-value disable pruning. If a problem does not provide a rigorous
-cellwise HJB-slack bound or terminal-cell bound, its corresponding error is
-infinite and pruning is disabled; sampled nodal finite differences are not
-treated as a continuous certificate proof.
+lower bound, and admissible nodes adjacent to blocked cells remain pinned to
+that lower bound. Cells proven to lie wholly inside an obstacle are excluded
+from the HJB domain; ambiguous non-finite cells make the error gate infinite.
+
+The paper benchmark additionally supplies the analytic radial function as a
+global cost-to-go lower bound and as a continuous HJB subsolution outside the
+finite grid. The outer two node layers are anchored to this function, and
+out-of-grid queries use the same extension. This avoids the artificial jump
+created by pinning a large radial value to zero at the outer boundary. The
+HJB slack is still bounded over every in-grid cell, including the transition
+from the analytic boundary strip to the iterated values; no cells are omitted
+merely to improve epsilon. This extension is enabled only when the problem
+explicitly declares the outside function to be a subsolution. Queries without
+a finite certificate value disable pruning. If a problem does not provide a
+rigorous cellwise HJB-slack bound or terminal-cell bound, its corresponding
+error is infinite and pruning is disabled; sampled nodal finite differences
+are not treated as a continuous certificate proof.
 
 For custom Bolza problems, `global_value_lower_bound` must be a valid lower
 bound on every admissible cost-to-go, and `running_cost_lower_bound` must be a

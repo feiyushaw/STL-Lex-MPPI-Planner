@@ -135,9 +135,17 @@ obstacle halo. Fully inadmissible cells are shown as excluded rather than
 silently omitted from the diagnostic. This method is read-only and does not
 change the cells or tolerances used by the certificate gate. The benchmark
 runner stores this neighborhood beside each capacity result so the source of
-the worst slack can be reviewed after a run. It also records `epsilon_coarse`
-and `epsilon_refined_cells`, allowing the local-refinement benefit to be
-measured separately from the Bellman iteration count.
+the worst slack can be reviewed after a run. It records both coarse and final
+cell lower bounds, whether the cell was actually refined in the certificate,
+the coarse-worst cell, and whether the refinement budget was exhausted.
+
+Adaptive refinement re-evaluates the near-active set after every batch instead
+of stopping after a fixed number of passes. The default budget is 256 cells,
+with batches capped at 64 cells. Refinement stops when no unrefined cell is
+within 80% of the current maximum violation, or when the budget is exhausted.
+The final `epsilon` is always computed from the final certified bound for
+every cell; unrefined cells retain their coarse bound.
+
 
 For the reported center/worst cell, the diagnostic payload now decomposes both
 the coarse and refined lower bounds into position-cost, x-transport,

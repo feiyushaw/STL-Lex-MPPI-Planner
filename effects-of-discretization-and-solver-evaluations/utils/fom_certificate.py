@@ -111,6 +111,11 @@ class FOMCertificateProblem:
     cell_slack_lower_bound: Optional[
         Callable[[Array, "RegularGrid", tuple[int, ...]], float]
     ] = None
+    # Optional tighter lower bound obtained by subdividing a grid cell.
+    # Both callbacks must return conservative lower bounds on the same cell.
+    cell_slack_lower_bound_refined: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], float]
+    ] = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +232,8 @@ class SemiLagrangianFOMCertificate:
         self._epsilon = 0.0
         self._epsilon_terminal = 0.0
         self._epsilon_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_coarse = 0.0
+        self._epsilon_refined_cells = 0
         self._bellman_monotone = True
         self._discrete_subsolution = False
 
@@ -773,22 +780,26 @@ class SemiLagrangianFOMCertificate:
     def _estimate_slack_error(self, values: Array) -> float:
         if self.iterations == 0 and self._has_exact_initial_subsolution():
             self._epsilon_worst_cell = None
+            self._epsilon_coarse = 0.0
+            self._epsilon_refined_cells = 0
             return 0.0
         # Nodal finite differences are not a continuous HJB-slack certificate.
         # Without a cellwise one-sided bound, disable pruning for this problem.
         if self.problem.cell_slack_lower_bound is None:
             self._epsilon_worst_cell = None
+            self._epsilon_coarse = np.inf
+            self._epsilon_refined_cells = 0
             return np.inf
 
         cell_shape = tuple(
             n if axis in self.grid.periodic_axes else n - 1
             for axis, n in enumerate(self.grid.shape)
         )
-        worst = 0.0
-        worst_cell = None
+        cell_lowers: dict[tuple[int, ...], float] = {}
         effective_values = None
         if self.problem.outside_domain_lower_bound is not None:
             effective_values = self._effective_extension_values(values)
+
         for cell in np.ndindex(cell_shape):
             corners = self._cell_corner_values(values, cell)
             if self.problem.outside_domain_lower_bound is not None:
@@ -798,8 +809,8 @@ class SemiLagrangianFOMCertificate:
                     and self.problem.cell_is_fully_inadmissible(lo, hi)
                 ):
                     continue
-                # Use the same obstacle extension as the interpolant, so the
-                # cellwise callback bounds the gradient of the queried field.
+                # Use the same extended nodal field as interpolation and
+                # terminal-error accounting.
                 lower = float(
                     self.problem.cell_slack_lower_bound(
                         effective_values, self.grid, cell
@@ -815,6 +826,8 @@ class SemiLagrangianFOMCertificate:
                     ):
                         continue
                     self._epsilon_worst_cell = cell
+                    self._epsilon_coarse = np.inf
+                    self._epsilon_refined_cells = 0
                     return np.inf
                 if not np.allclose(
                     finite_corners,
@@ -823,6 +836,8 @@ class SemiLagrangianFOMCertificate:
                     atol=1e-12,
                 ):
                     self._epsilon_worst_cell = cell
+                    self._epsilon_coarse = np.inf
+                    self._epsilon_refined_cells = 0
                     return np.inf
                 lower = float(self.problem.running_cost_lower_bound)
             else:
@@ -831,13 +846,82 @@ class SemiLagrangianFOMCertificate:
                 )
             if not np.isfinite(lower):
                 self._epsilon_worst_cell = cell
+                self._epsilon_coarse = np.inf
+                self._epsilon_refined_cells = 0
                 return np.inf
+            cell_lowers[cell] = lower
+
+        coarse_epsilon = max(
+            (max(0.0, -lower) for lower in cell_lowers.values()),
+            default=0.0,
+        )
+        self._epsilon_coarse = float(coarse_epsilon)
+        self._epsilon_refined_cells = 0
+
+        # Refine only cells whose coarse bounds can materially affect the
+        # global maximum. Each refined callback must itself return a rigorous
+        # lower bound on the entire parent cell (the minimum of its subcell
+        # bounds). max(coarse, refined) remains a valid, tighter lower bound.
+        refined_callback = self.problem.cell_slack_lower_bound_refined
+        if (
+            refined_callback is not None
+            and effective_values is not None
+            and coarse_epsilon > 0.0
+        ):
+            refined_cells: set[tuple[int, ...]] = set()
+            for _ in range(3):
+                current_worst = max(
+                    (max(0.0, -lower) for lower in cell_lowers.values()),
+                    default=0.0,
+                )
+                if current_worst <= 0.0:
+                    break
+                unrefined = [
+                    cell for cell in cell_lowers if cell not in refined_cells
+                ]
+                if not unrefined:
+                    break
+                threshold = 0.8 * current_worst
+                candidates = [
+                    cell
+                    for cell in unrefined
+                    if max(0.0, -cell_lowers[cell]) >= threshold
+                ]
+                if not candidates:
+                    candidates = [
+                        max(
+                            unrefined,
+                            key=lambda cell: max(0.0, -cell_lowers[cell]),
+                        )
+                    ]
+                candidates.sort(
+                    key=lambda cell: max(0.0, -cell_lowers[cell]),
+                    reverse=True,
+                )
+                # Bound the extra work per pass. Unrefined cells retain their
+                # coarse certified bounds, so this cap affects tightness only.
+                candidates = candidates[:64]
+                for cell in candidates:
+                    refined_lower = float(
+                        refined_callback(effective_values, self.grid, cell)
+                    )
+                    if not np.isfinite(refined_lower):
+                        self._epsilon_worst_cell = cell
+                        self._epsilon_refined_cells = len(refined_cells)
+                        return np.inf
+                    cell_lowers[cell] = max(cell_lowers[cell], refined_lower)
+                    refined_cells.add(cell)
+            self._epsilon_refined_cells = len(refined_cells)
+
+        worst = 0.0
+        worst_cell = None
+        for cell, lower in cell_lowers.items():
             violation = max(0.0, -lower)
             if violation > worst:
                 worst = violation
                 worst_cell = cell
         self._epsilon_worst_cell = worst_cell
-        return float(max(0.0, worst))
+        return float(worst)
 
     def _generic_slack_error(self, values: Array) -> float:
         nodes = self.nodes
@@ -1312,17 +1396,18 @@ def make_paper_unicycle_problem(
 
     radial_node_cache: dict[tuple, Array] = {}
 
-    def cell_slack_lower_bound(
-        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    def cell_slack_lower_bound_impl(
+        values: Array,
+        grid: RegularGrid,
+        cell: tuple[int, int, int],
+        subdivisions: int,
     ) -> float:
-        """Rigorous lower bound on ell + grad(V) dot f over one grid cell."""
+        """Conservative HJB-slack lower bound, optionally subdividing a cell."""
         h = grid.spacing
-        v = np.asarray(values, dtype=float).reshape(grid.shape)
-        if np.any(~np.isfinite(v)):
-            v = np.where(np.isfinite(v), v, 0.0)
-        # The continuous field is radial_terminal_cost(x) plus a multilinear
-        # interpolation of nodal residuals. The radial part is independent of
-        # heading, so only residuals contribute to dV/dphi.
+        nodal_values = np.asarray(values, dtype=float).reshape(grid.shape)
+        if np.any(~np.isfinite(nodal_values)):
+            nodal_values = np.where(np.isfinite(nodal_values), nodal_values, 0.0)
+
         grid_key = (
             tuple(grid.lower.tolist()),
             tuple(grid.upper.tolist()),
@@ -1335,137 +1420,171 @@ def make_paper_unicycle_problem(
                 grid.nodes, goal, goal_radius, q_position, forward_speed
             ).reshape(grid.shape)
             radial_node_cache[grid_key] = radial_nodes
-        v = v - radial_nodes
-        corner_axes = []
-        for axis, i in enumerate(cell):
-            n = grid.shape[axis]
-            if axis in grid.periodic_axes:
-                corner_axes.append((i % n, (i + 1) % n))
-            else:
-                corner_axes.append((i, i + 1))
+        residual_nodes = nodal_values - radial_nodes
 
-        grad_bounds = []
-        for axis in range(3):
-            vals = []
-            other_axes = [a for a in range(3) if a != axis]
-            for bits in product((0, 1), repeat=2):
-                idx_lo = [0, 0, 0]
-                idx_hi = [0, 0, 0]
-                for j, a in enumerate(other_axes):
-                    idx_lo[a] = corner_axes[a][bits[j]]
-                    idx_hi[a] = idx_lo[a]
-                idx_lo[axis] = corner_axes[axis][0]
-                idx_hi[axis] = corner_axes[axis][1]
-                a = v[tuple(idx_lo)]
-                b = v[tuple(idx_hi)]
-                if np.isfinite(a) and np.isfinite(b):
-                    vals.append(float((b - a) / h[axis]))
-            if not vals:
-                return np.inf
-            grad_bounds.append((min(vals), max(vals)))
+        corner_indices = []
+        for bits in product((0, 1), repeat=3):
+            idx = []
+            for axis, bit in enumerate(bits):
+                j = cell[axis] + bit
+                if axis in grid.periodic_axes:
+                    j %= grid.shape[axis]
+                idx.append(j)
+            corner_indices.append(tuple(idx))
+        corner_residual = np.empty((2, 2, 2), dtype=float)
+        for bits, idx in zip(product((0, 1), repeat=3), corner_indices):
+            corner_residual[bits] = residual_nodes[idx]
 
-        # Add a rigorous interval enclosure for the analytic radial gradient:
-        # grad_p v_rad = (q_position / forward_speed) * d * (p - goal).
-        xlo = grid.lower[0] + cell[0] * h[0]
-        xhi = xlo + h[0]
-        ylo = grid.lower[1] + cell[1] * h[1]
-        yhi = ylo + h[1]
-        dx0, dx1 = xlo - goal[0], xhi - goal[0]
-        dy0, dy1 = ylo - goal[1], yhi - goal[1]
-        dx_min = 0.0 if dx0 <= 0.0 <= dx1 else min(abs(dx0), abs(dx1))
-        dy_min = 0.0 if dy0 <= 0.0 <= dy1 else min(abs(dy0), abs(dy1))
-        d_min = float(np.hypot(dx_min, dy_min))
-        d_max = float(max(
-            np.hypot(dx, dy)
-            for dx in (dx0, dx1)
-            for dy in (dy0, dy1)
-        ))
+        parent_lo = grid.lower + np.asarray(cell, dtype=float) * h
 
         def interval_product(a0, a1, b0, b1):
             products = (a0 * b0, a0 * b1, a1 * b0, a1 * b1)
             return min(products), max(products)
 
-        radial_scale = q_position / forward_speed
-        if d_max <= goal_radius:
-            # The clipped radial function is identically zero inside the goal.
-            rgx0 = rgx1 = rgy0 = rgy1 = 0.0
-        else:
-            rgx0, rgx1 = interval_product(dx0, dx1, d_min, d_max)
-            rgy0, rgy1 = interval_product(dy0, dy1, d_min, d_max)
-            rgx0, rgx1 = radial_scale * rgx0, radial_scale * rgx1
-            rgy0, rgy1 = radial_scale * rgy0, radial_scale * rgy1
-            if d_min < goal_radius:
-                # A cell crossing the target boundary contains both zero
-                # gradients (inside) and radial gradients (outside).
-                rgx0, rgx1 = min(rgx0, 0.0), max(rgx1, 0.0)
-                rgy0, rgy1 = min(rgy0, 0.0), max(rgy1, 0.0)
-        grad_bounds[0] = (
-            grad_bounds[0][0] + rgx0,
-            grad_bounds[0][1] + rgx1,
-        )
-        grad_bounds[1] = (
-            grad_bounds[1][0] + rgy0,
-            grad_bounds[1][1] + rgy1,
-        )
+        def product_lower(a0, a1, b0, b1):
+            return min(a0 * b0, a0 * b1, a1 * b0, a1 * b1)
 
-        phi_lo = grid.lower[2] + cell[2] * h[2]
-        phi_hi = phi_lo + h[2]
-
-        def trig_interval(fn):
-            vals = [float(fn(phi_lo)), float(fn(phi_hi))]
+        def trig_interval(fn, lo, hi):
+            vals = [float(fn(lo)), float(fn(hi))]
             if fn is np.sin:
-                k0 = int(np.ceil((phi_lo - np.pi / 2.0) / np.pi))
-                k1 = int(np.floor((phi_hi - np.pi / 2.0) / np.pi))
+                k0 = int(np.ceil((lo - np.pi / 2.0) / np.pi))
+                k1 = int(np.floor((hi - np.pi / 2.0) / np.pi))
                 for k in range(k0, k1 + 1):
                     vals.append(float(fn(np.pi / 2.0 + k * np.pi)))
             else:
-                k0 = int(np.ceil(phi_lo / np.pi))
-                k1 = int(np.floor(phi_hi / np.pi))
+                k0 = int(np.ceil(lo / np.pi))
+                k1 = int(np.floor(hi / np.pi))
                 for k in range(k0, k1 + 1):
                     vals.append(float(fn(k * np.pi)))
             return min(vals), max(vals)
 
-        def product_lower(a0, a1, b0, b1):
-            return min(a0 * b0, a0 * b1, a1 * b0, a1 * b1)
+        subcell_lowers = []
+        for sub_index in product(range(subdivisions), repeat=3):
+            frac_lo = np.asarray(sub_index, dtype=float) / subdivisions
+            frac_hi = (np.asarray(sub_index, dtype=float) + 1.0) / subdivisions
+            sub_lo = parent_lo + frac_lo * h
+            sub_hi = parent_lo + frac_hi * h
 
-        cos0, cos1 = trig_interval(np.cos)
-        sin0, sin1 = trig_interval(np.sin)
-        gx0, gx1 = grad_bounds[0]
-        gy0, gy1 = grad_bounds[1]
-        gp0, gp1 = grad_bounds[2]
+            # The derivative of a trilinear interpolant in one axis is
+            # bilinear in the other two. Its extrema on a subrectangle occur
+            # at the four endpoint combinations of those two coordinates.
+            grad_bounds = []
+            for axis in range(3):
+                other_axes = [a for a in range(3) if a != axis]
+                derivative_values = []
+                for endpoint_bits in product((0, 1), repeat=2):
+                    other_t = [
+                        frac_lo[a] if bit == 0 else frac_hi[a]
+                        for a, bit in zip(other_axes, endpoint_bits)
+                    ]
+                    derivative = 0.0
+                    for corner_bits in product((0, 1), repeat=2):
+                        idx0 = [0, 0, 0]
+                        idx1 = [0, 0, 0]
+                        weight = 1.0
+                        for j, other_axis in enumerate(other_axes):
+                            bit = corner_bits[j]
+                            idx0[other_axis] = bit
+                            idx1[other_axis] = bit
+                            t = other_t[j]
+                            weight *= t if bit else 1.0 - t
+                        idx0[axis] = 0
+                        idx1[axis] = 1
+                        derivative += weight * (
+                            corner_residual[tuple(idx1)]
+                            - corner_residual[tuple(idx0)]
+                        )
+                    derivative_values.append(float(derivative / h[axis]))
+                grad_bounds.append(
+                    (min(derivative_values), max(derivative_values))
+                )
 
-        dx = 0.0 if xlo <= goal[0] <= xhi else min(
-            abs(goal[0] - xlo), abs(goal[0] - xhi)
-        )
-        dy = 0.0 if ylo <= goal[1] <= yhi else min(
-            abs(goal[1] - ylo), abs(goal[1] - yhi)
-        )
-        position_cost_lower = q_position * (dx * dx + dy * dy)
-
-        position_transport_lower = forward_speed * (
-            product_lower(gx0, gx1, cos0, cos1)
-            + product_lower(gy0, gy1, sin0, sin1)
-        )
-
-        u_candidates = [
-            control_min,
-            control_max,
-            float(np.clip(0.0, control_min, control_max)),
-            float(np.clip(-gp0 / (2.0 * r_control), control_min, control_max)),
-            float(np.clip(-gp1 / (2.0 * r_control), control_min, control_max)),
-        ]
-        control_lower = np.inf
-        for uu in u_candidates:
-            gphi = gp0 if uu >= 0.0 else gp1
-            control_lower = min(
-                control_lower, r_control * uu * uu + gphi * uu
+            # Interval enclosure of the analytic radial gradient on this
+            # subcell: grad_p v_rad = (q_position / v_bar) * d * (p-goal).
+            xlo, xhi = float(sub_lo[0]), float(sub_hi[0])
+            ylo, yhi = float(sub_lo[1]), float(sub_hi[1])
+            dx0, dx1 = xlo - goal[0], xhi - goal[0]
+            dy0, dy1 = ylo - goal[1], yhi - goal[1]
+            dx_min = 0.0 if dx0 <= 0.0 <= dx1 else min(abs(dx0), abs(dx1))
+            dy_min = 0.0 if dy0 <= 0.0 <= dy1 else min(abs(dy0), abs(dy1))
+            d_min = float(np.hypot(dx_min, dy_min))
+            d_max = float(max(
+                np.hypot(dx, dy)
+                for dx in (dx0, dx1)
+                for dy in (dy0, dy1)
+            ))
+            radial_scale = q_position / forward_speed
+            if d_max <= goal_radius:
+                rgx0 = rgx1 = rgy0 = rgy1 = 0.0
+            else:
+                rgx0, rgx1 = interval_product(dx0, dx1, d_min, d_max)
+                rgy0, rgy1 = interval_product(dy0, dy1, d_min, d_max)
+                rgx0, rgx1 = radial_scale * rgx0, radial_scale * rgx1
+                rgy0, rgy1 = radial_scale * rgy0, radial_scale * rgy1
+                if d_min < goal_radius:
+                    rgx0, rgx1 = min(rgx0, 0.0), max(rgx1, 0.0)
+                    rgy0, rgy1 = min(rgy0, 0.0), max(rgy1, 0.0)
+            grad_bounds[0] = (
+                grad_bounds[0][0] + rgx0,
+                grad_bounds[0][1] + rgx1,
+            )
+            grad_bounds[1] = (
+                grad_bounds[1][0] + rgy0,
+                grad_bounds[1][1] + rgy1,
             )
 
-        return float(
-            position_cost_lower
-            + position_transport_lower
-            + control_lower
-        )
+            cos0, cos1 = trig_interval(np.cos, float(sub_lo[2]), float(sub_hi[2]))
+            sin0, sin1 = trig_interval(np.sin, float(sub_lo[2]), float(sub_hi[2]))
+            gx0, gx1 = grad_bounds[0]
+            gy0, gy1 = grad_bounds[1]
+            gp0, gp1 = grad_bounds[2]
+
+            dx_cost = 0.0 if xlo <= goal[0] <= xhi else min(
+                abs(goal[0] - xlo), abs(goal[0] - xhi)
+            )
+            dy_cost = 0.0 if ylo <= goal[1] <= yhi else min(
+                abs(goal[1] - ylo), abs(goal[1] - yhi)
+            )
+            position_cost_lower = q_position * (
+                dx_cost * dx_cost + dy_cost * dy_cost
+            )
+            position_transport_lower = forward_speed * (
+                product_lower(gx0, gx1, cos0, cos1)
+                + product_lower(gy0, gy1, sin0, sin1)
+            )
+
+            u_candidates = [
+                control_min,
+                control_max,
+                float(np.clip(0.0, control_min, control_max)),
+                float(np.clip(-gp0 / (2.0 * r_control), control_min, control_max)),
+                float(np.clip(-gp1 / (2.0 * r_control), control_min, control_max)),
+            ]
+            control_lower = np.inf
+            for uu in u_candidates:
+                gphi = gp0 if uu >= 0.0 else gp1
+                control_lower = min(
+                    control_lower, r_control * uu * uu + gphi * uu
+                )
+
+            subcell_lowers.append(float(
+                position_cost_lower + position_transport_lower + control_lower
+            ))
+
+        # The parent-cell infimum is the minimum over its subcells. Taking
+        # the minimum of conservative subcell lower bounds is conservative
+        # for the entire parent cell and tightens interval dependencies.
+        return float(min(subcell_lowers))
+
+    def cell_slack_lower_bound(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        return cell_slack_lower_bound_impl(values, grid, cell, subdivisions=1)
+
+    def cell_slack_lower_bound_refined(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        return cell_slack_lower_bound_impl(values, grid, cell, subdivisions=2)
 
     return FOMCertificateProblem(
         dynamics=dynamics,
@@ -1487,6 +1606,7 @@ def make_paper_unicycle_problem(
         outside_domain_is_subsolution=True,
         control_lipschitz_bound=control_lipschitz_bound,
         cell_slack_lower_bound=cell_slack_lower_bound,
+        cell_slack_lower_bound_refined=cell_slack_lower_bound_refined,
     )
 
 

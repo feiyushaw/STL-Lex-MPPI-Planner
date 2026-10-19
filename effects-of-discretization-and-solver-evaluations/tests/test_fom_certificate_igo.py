@@ -131,6 +131,57 @@ def test_certificate_prefix_bound_is_never_above_known_rollout_cost():
         assert bound <= full_cost + 1e-7
 
 
+def test_corrected_prefix_bound_stays_below_random_feasible_rollout_costs():
+    cert = make_certificate(iterations=2)
+    problem = cert.problem
+    rng = np.random.default_rng(20261019)
+    x0 = np.array([1.0, 0.8, 0.0])
+    horizon = 8
+    checked_paths = 0
+
+    for _ in range(64):
+        controls = rng.uniform(-1.0, 1.0, size=horizon)
+        states = [x0.copy()]
+        stages = []
+        x = x0.copy()
+        feasible = True
+        for control in controls:
+            stages.append(
+                problem.dt
+                * float(
+                    problem.running_cost(
+                        x[None, :], np.array([[control]])
+                    )[0]
+                )
+            )
+            x = x + problem.dt * problem.dynamics(
+                x[None, :], np.array([[control]])
+            )[0]
+            if not problem.admissible(x[None, :])[0]:
+                feasible = False
+                break
+            states.append(x.copy())
+
+        if not feasible:
+            continue
+
+        total_cost = sum(stages) + float(
+            problem.terminal_cost(states[-1][None, :])[0]
+        )
+        prefix = 0.0
+        for k, stage in enumerate(stages):
+            prefix += stage
+            bound = cert.prefix_bound(
+                prefix,
+                states[k + 1],
+                problem.dt * (horizon - k - 1),
+            )
+            assert bound <= total_cost + 1e-7
+        checked_paths += 1
+
+    assert checked_paths >= 8
+
+
 def test_pruned_prefixes_are_not_scored_or_used_as_elites():
     cert = make_certificate(iterations=1)
     solver = CertificateGuidedIGOSolver(

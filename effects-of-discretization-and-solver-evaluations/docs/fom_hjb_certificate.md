@@ -111,7 +111,7 @@ are not treated as a continuous certificate proof.
 
 ## Local slack audit
 
-\`cell_slack_neighborhood(center, radius=1)\` reports the selected cell and its
+`cell_slack_neighborhood(center, radius=1)` reports the selected cell and its
 neighbors with their physical bounds, lower slack bound, violation, distance
 to the outer grid boundary, and whether any corner touches the conservative
 obstacle halo. Fully inadmissible cells are shown as excluded rather than
@@ -122,7 +122,7 @@ the worst slack can be reviewed after a run.
 
 ## Batched certificate queries
 
-\`value_batch\`, \`corrected_lower_bound_batch\`, and \`prefix_bound_batch\` are
+`value_batch`, `corrected_lower_bound_batch`, and `prefix_bound_batch` are
 vectorized counterparts of the scalar query methods. The IGO rollout loop
 uses a single batch prefix-bound query for all currently active rollouts at
 each horizon step. This avoids one Python-level interpolation call per

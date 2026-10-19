@@ -146,7 +146,9 @@ def test_pruned_prefixes_are_not_scored_or_used_as_elites():
     )
     # Force the pruning branch to isolate the rollout bookkeeping invariant.
     solver.incumbent_cost = -1.0e9
-    solver.certificate.prefix_bound = lambda *args: 1.0
+    solver.certificate.prefix_bound_batch = (
+        lambda prefix, states, remaining_time: np.ones(states.shape[0])
+    )
     controls = np.zeros((4, 1, 8), dtype=float)
 
     _, costs, pruned, infeasible_count, completed_count = solver._rollout_batch(

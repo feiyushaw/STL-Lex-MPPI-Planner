@@ -93,6 +93,31 @@ def test_control_lipschitz_bound_scales_running_cost_derivative_by_dt():
     assert np.isclose(bound, expected, rtol=0.0, atol=1e-12)
 
 
+def test_radial_gradient_bound_respects_flat_target_interior():
+    problem = make_paper_unicycle_problem(
+        goal=(0.0, 0.0),
+        goal_radius=0.5,
+        forward_speed=1.0,
+        q_position=1.0,
+        r_control=0.1,
+        control_min=-1.0,
+        control_max=1.0,
+        dt=0.1,
+        n_controls=9,
+    )
+    grid = RegularGrid(
+        lower=np.array([-1.0, -1.0, -np.pi]),
+        upper=np.array([1.0, 1.0, np.pi]),
+        shape=(9, 9, 8),
+        periodic_axes=(2,),
+    )
+    values = problem.terminal_cost(grid.nodes)
+    # This cell lies wholly inside the radius-0.5 target, where the clipped
+    # radial function and its spatial gradient are exactly zero.
+    lower_slack = problem.cell_slack_lower_bound(values, grid, (4, 4, 0))
+    assert np.isclose(lower_slack, 0.0, rtol=0.0, atol=1e-12)
+
+
 def test_interpolation_does_not_renormalize_around_infinite_corners():
     base = make_small_certificate(iterations=0)
     # Exercise the generic fail-closed path, which has no continuous

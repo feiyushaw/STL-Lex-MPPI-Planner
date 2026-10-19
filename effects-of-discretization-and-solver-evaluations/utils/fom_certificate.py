@@ -433,10 +433,12 @@ class SemiLagrangianFOMCertificate:
 
         In the generic path, zero-weight non-finite corners are ignored and a
         positive-weight unavailable corner makes the query fall back to the
-        global lower bound. With the certified radial extension, unavailable
-        nodes are replaced by that lower bound for interpolation only; the
-        baseline-plus-residual representation stays continuous and the
-        cellwise slack estimator accounts for the resulting gradients.
+        global lower bound. With the certified radial extension, blocked
+        nodes receive a nearest-admissible extension of the residual V-v_rad.
+        The identical extension is used by the continuous cellwise slack and
+        terminal-error estimators, avoiding an artificial zero-valued obstacle
+        layer while retaining explicit fail-closed behavior without a certified
+        extension.
         """
         points = np.asarray(points, dtype=float)
         if points.ndim == 1:

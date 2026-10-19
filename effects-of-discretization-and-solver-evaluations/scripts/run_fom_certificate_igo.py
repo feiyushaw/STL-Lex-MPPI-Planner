@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -84,7 +85,9 @@ def main() -> None:
             grid,
             iterations=capacity,
         )
+        certificate_build_started = time.perf_counter()
         report = certificate.build()
+        certificate_build_seconds = time.perf_counter() - certificate_build_started
         worst_cell_neighborhood = (
             certificate.cell_slack_neighborhood(radius=1)
             if report.epsilon_worst_cell is not None
@@ -104,10 +107,15 @@ def main() -> None:
             initial_std=0.5,
             random_seed=args.seed,
         )
+        igo_solve_started = time.perf_counter()
         _, best_cost, reports = solver.solve()
+        igo_solve_seconds = time.perf_counter() - igo_solve_started
         rows.append(
             {
                 "certificate_iterations": capacity,
+                "certificate_build_seconds": certificate_build_seconds,
+                "igo_solve_seconds": igo_solve_seconds,
+                "completed_rollouts": solver.evaluated_rollouts_total,
                 "epsilon": report.epsilon,
                 "epsilon_terminal": report.epsilon_terminal,
                 "epsilon_worst_cell": (

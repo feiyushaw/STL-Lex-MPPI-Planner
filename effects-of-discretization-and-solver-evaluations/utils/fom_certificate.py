@@ -122,6 +122,7 @@ class CertificateReport:
     admissible_nodes: int
     bellman_monotone: bool
     discrete_subsolution: bool
+    epsilon_worst_cell: Optional[tuple[int, ...]] = None
 
 
 class SemiLagrangianFOMCertificate:
@@ -211,6 +212,7 @@ class SemiLagrangianFOMCertificate:
         self._built = False
         self._epsilon = 0.0
         self._epsilon_terminal = 0.0
+        self._epsilon_worst_cell: Optional[tuple[int, ...]] = None
         self._bellman_monotone = True
         self._discrete_subsolution = False
 
@@ -680,10 +682,12 @@ class SemiLagrangianFOMCertificate:
 
     def _estimate_slack_error(self, values: Array) -> float:
         if self.iterations == 0 and self._has_exact_initial_subsolution():
+            self._epsilon_worst_cell = None
             return 0.0
         # Nodal finite differences are not a continuous HJB-slack certificate.
         # Without a cellwise one-sided bound, disable pruning for this problem.
         if self.problem.cell_slack_lower_bound is None:
+            self._epsilon_worst_cell = None
             return np.inf
 
         cell_shape = tuple(
@@ -691,6 +695,7 @@ class SemiLagrangianFOMCertificate:
             for axis, n in enumerate(self.grid.shape)
         )
         worst = 0.0
+        worst_cell = None
         for cell in np.ndindex(cell_shape):
             corners = self._cell_corner_values(values, cell)
             if self.problem.outside_domain_lower_bound is not None:
@@ -723,6 +728,7 @@ class SemiLagrangianFOMCertificate:
                         and self.problem.cell_is_fully_inadmissible(lo, hi)
                     ):
                         continue
+                    self._epsilon_worst_cell = cell
                     return np.inf
                 if not np.allclose(
                     finite_corners,
@@ -730,6 +736,7 @@ class SemiLagrangianFOMCertificate:
                     rtol=0.0,
                     atol=1e-12,
                 ):
+                    self._epsilon_worst_cell = cell
                     return np.inf
                 lower = float(self.problem.running_cost_lower_bound)
             else:
@@ -737,8 +744,13 @@ class SemiLagrangianFOMCertificate:
                     self.problem.cell_slack_lower_bound(values, self.grid, cell)
                 )
             if not np.isfinite(lower):
+                self._epsilon_worst_cell = cell
                 return np.inf
-            worst = max(worst, -lower)
+            violation = max(0.0, -lower)
+            if violation > worst:
+                worst = violation
+                worst_cell = cell
+        self._epsilon_worst_cell = worst_cell
         return float(max(0.0, worst))
 
     def _generic_slack_error(self, values: Array) -> float:
@@ -819,6 +831,7 @@ class SemiLagrangianFOMCertificate:
             ),
             bellman_monotone=self._bellman_monotone,
             discrete_subsolution=self._discrete_subsolution,
+            epsilon_worst_cell=self._epsilon_worst_cell,
         )
 
     @property

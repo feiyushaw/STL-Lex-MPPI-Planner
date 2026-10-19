@@ -185,7 +185,7 @@ def main() -> None:
                 certificate.values[-1]
             ).reshape(grid.shape)
             extension_residual = (
-                extended_values - certificate._domain_baseline_nodes
+                extended_values - certificate._domain_baseline_nodes.reshape(grid.shape)
             )
             obstacle_extension_residual_abs_max = float(
                 np.max(np.abs(extension_residual[blocked_mask]))

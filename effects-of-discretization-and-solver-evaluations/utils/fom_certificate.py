@@ -435,13 +435,14 @@ class SemiLagrangianFOMCertificate:
                 self.problem.global_value_lower_bound,
             ).reshape(-1)
 
+        baseline_grid = baseline.reshape(self.grid.shape)
         valid = self._node_admissible & np.isfinite(raw)
         if not np.any(valid) or self._nearest_admissible_indices is None:
             return np.full(raw.size, self.problem.global_value_lower_bound)
 
         residual = np.zeros(self.grid.shape, dtype=float)
-        residual[valid] = raw[valid] - baseline[valid]
-        extended = baseline + residual[self._nearest_admissible_indices]
+        residual[valid] = raw[valid] - baseline_grid[valid]
+        extended = baseline_grid + residual[self._nearest_admissible_indices]
         extended[valid] = raw[valid]
         return extended.reshape(-1)
 

@@ -51,10 +51,13 @@ cellwise derivative intervals, exact trigonometric intervals, the exact
 position-cell minimum, and continuous minimization of the quadratic control
 term are used to obtain a one-sided slack bound.
 
-The terminal error is bounded over all grid cells intersecting the target,
-rather than treating only target grid nodes as a global check. The radial
-terminal-cell lower bound is zero because the terminal cost is zero on the
-target set.
+The terminal error is bounded over every grid cell that intersects the
+admissible state domain. This is required by the current primal implementation:
+it evaluates the radial terminal cost at every endpoint and does not enforce
+terminal_set as a hard endpoint constraint. Bounding mismatch only on the goal
+set would be valid only after the primal solver rejects endpoints outside that
+set. The radial terminal-cell lower bound is zero because the radial terminal
+cost is nonnegative and vanishes on the target set.
 
 ## Certificate invariants
 

@@ -1025,6 +1025,8 @@ def make_paper_unicycle_problem(
         # is bounded by dt*(2*r_u*|u| + |dV/dphi|).
         return dt * (max_grad_phi + 2.0 * r_control * max_u)
 
+    radial_node_cache: dict[tuple, Array] = {}
+
     def cell_slack_lower_bound(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
     ) -> float:
@@ -1036,9 +1038,18 @@ def make_paper_unicycle_problem(
         # The continuous field is radial_terminal_cost(x) plus a multilinear
         # interpolation of nodal residuals. The radial part is independent of
         # heading, so only residuals contribute to dV/dphi.
-        radial_nodes = radial_terminal_cost(
-            grid.nodes, goal, goal_radius, q_position, forward_speed
-        ).reshape(grid.shape)
+        grid_key = (
+            tuple(grid.lower.tolist()),
+            tuple(grid.upper.tolist()),
+            grid.shape,
+            grid.periodic_axes,
+        )
+        radial_nodes = radial_node_cache.get(grid_key)
+        if radial_nodes is None:
+            radial_nodes = radial_terminal_cost(
+                grid.nodes, goal, goal_radius, q_position, forward_speed
+            ).reshape(grid.shape)
+            radial_node_cache[grid_key] = radial_nodes
         v = v - radial_nodes
         corner_axes = []
         for axis, i in enumerate(cell):

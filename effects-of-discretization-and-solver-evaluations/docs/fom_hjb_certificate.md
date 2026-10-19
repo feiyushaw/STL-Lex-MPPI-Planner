@@ -51,16 +51,19 @@ cellwise derivative intervals, exact trigonometric intervals, the exact
 position-cell minimum, and continuous minimization of the quadratic control
 term are used to obtain a one-sided slack bound.
 
-For the radial-extension benchmark, a second bound subdivides selected
-high-violation cells into 2x2x2 subcells. Derivative intervals are recomputed
-on each subcell from the same trilinear interpolant, while radial-gradient and
-trigonometric intervals are restricted to the subcell. The minimum of the
+For the radial-extension benchmark, the first refinement level subdivides
+selected high-violation cells into 2x2x2 subcells. Derivative intervals are
+recomputed on each subcell from the same trilinear interpolant, while
+radial-gradient and trigonometric intervals are restricted to the subcell. A
+separate, small deep-refinement budget then applies a 4x4x4 enclosure to the
+highest-impact cells already refined at the first level. The minimum of the
 subcell lower bounds is a lower bound for the parent cell. The estimator first
-records the all-cell coarse epsilon, then refines up to three batches of at
-most 64 near-worst cells. Unrefined cells retain their coarse bounds, and each
-cell retains the stronger of its coarse and refined lower bounds. Therefore
-the refinement can tighten epsilon but cannot make the certificate less
-conservative; it does not alter Bellman values or skip additional cells.
+records the all-cell coarse epsilon, then adaptively refines near-worst cells
+in batches of at most 64. Unrefined cells retain their coarse bounds, and each
+cell retains the strongest (maximum) of the certified lower bounds evaluated
+for it. Therefore refinement can tighten epsilon but cannot make the
+certificate less conservative; it does not alter Bellman values or skip
+admissible cells.
 
 The terminal error is bounded over every grid cell that intersects the
 admissible state domain. This is required by the current primal implementation:
@@ -77,8 +80,10 @@ A built certificate reports:
 - epsilon: global running-slack feasibility tolerance after local
   subdivision refinement;
 - epsilon_coarse: the same global tolerance before subdivision refinement;
-- epsilon_refined_cells: number of cells for which a refined bound was
+- epsilon_refined_cells: number of cells for which the 2x2x2 bound was
   evaluated;
+- epsilon_deep_refined_cells: number of those cells also evaluated with a
+  4x4x4 bound;
 - epsilon_terminal: terminal feasibility tolerance;
 - epsilon_worst_cell: grid-cell index attaining the largest finite slack
   violation, for diagnosing where epsilon originates;
@@ -139,16 +144,25 @@ the worst slack can be reviewed after a run. It records both coarse and final
 cell lower bounds, whether the cell was actually refined in the certificate,
 the coarse-worst cell, and whether the refinement budget was exhausted.
 
-Adaptive refinement re-evaluates the near-active set after every batch instead
-of stopping after a fixed number of passes. The default budget is 256 cells,
-with batches capped at 64 cells. Refinement stops when no unrefined cell is
-within 80% of the current maximum violation, or when the budget is exhausted.
-The final `epsilon` is always computed from the final certified bound for
-every cell; unrefined cells retain their coarse bound. The cell budget is
-configurable through `SemiLagrangianFOMCertificate(refinement_budget=...)`
-and the benchmark flag `--certificate-refinement-budget`. The default remains
-256 until a larger-budget capacity sweep demonstrates a worthwhile
-accuracy/runtime trade-off.
+Adaptive first-level refinement re-evaluates the near-active set after every
+batch instead of stopping after a fixed number of passes. Its default budget is
+256 cells, with batches capped at 64 cells. Refinement stops when no unrefined
+cell is within 80% of the current maximum violation, or when the budget is
+exhausted. The final `epsilon` is computed from the final certified bound for
+every cell; unrefined cells retain their coarse bound. The first-level budget
+is configurable through `SemiLagrangianFOMCertificate(refinement_budget=...)`
+and `--certificate-refinement-budget`.
+
+A separate deep-refinement stage defaults to 8 cells. It sorts the first-level
+refined cells by their current violation and re-evaluates only the highest-impact
+cells using 4x4x4 subcells. This targets a persistent local bottleneck such as
+the obstacle-corner cell `[4, 11, 3]` without multiplying the work across all
+512 first-level cells. Configure it through
+`SemiLagrangianFOMCertificate(deep_refinement_budget=...)` or
+`--certificate-deep-refinement-budget`. Both budgets are independently
+audited. A higher first-level budget remains useful for reducing the worst
+unrefined-cell violation; deep refinement targets the residual violation among
+already-refined cells. Neither budget changes the mathematical gate.
 
 The benchmark separately records the worst refined cell and worst unrefined
 cell, with their final violation magnitudes. This distinguishes a true
@@ -157,12 +171,13 @@ refer to an unrefined cell even though a refined cell has the same maximum
 violation.
 
 
-For the reported center/worst cell, the diagnostic payload now decomposes both
-the coarse and refined lower bounds into position-cost, x-transport,
-y-transport, and control contributions. It also records the worst refined
-subcell, its physical bounds, and residual/radial/total gradient intervals.
-This is diagnostic-only: it does not modify epsilon, select extra cells for
-refinement, or alter any prefix bound used for pruning.
+For the reported center/worst cell, the diagnostic payload decomposes the
+coarse, 2x2x2-refined, and 4x4x4-deep-refined lower bounds into position-cost,
+x-transport, y-transport, and control contributions. Each level records its
+worst subcell, physical bounds, and residual/radial/total gradient intervals.
+The summary separately records the worst cell refined at each level and whether
+either budget remains active. Diagnostics themselves do not change epsilon or
+select additional cells for refinement.
 
 ## Batched certificate queries
 

@@ -227,6 +227,70 @@ def test_corrected_lower_bound_accounts_for_certificate_errors():
     assert np.isfinite(corrected)
 
 
+def test_batch_certificate_queries_match_scalar_queries():
+    cert = make_small_certificate(
+        iterations=2,
+        obstacles=((-0.5, 0.5, -0.5, 0.5),),
+    )
+    cert.build()
+    states = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [2.5, 0.0, 0.0],  # outside the grid, using the analytic extension
+            [0.0, 0.0, 0.0],  # blocked state must disable pruning
+            [1.0, 0.0, 3.13],  # close to the periodic heading seam
+        ]
+    )
+    remaining = np.array([0.1, 0.5, 1.0, 0.25])
+    prefix = np.array([1.0, 2.0, 3.0, 4.0])
+
+    batch_values = cert.value_batch(states)
+    scalar_values = np.array([cert.value(state) for state in states])
+    assert np.allclose(batch_values, scalar_values, rtol=0.0, atol=1e-12)
+
+    batch_lower = cert.corrected_lower_bound_batch(states, remaining)
+    scalar_lower = np.array(
+        [
+            cert.corrected_lower_bound(state, float(time))
+            for state, time in zip(states, remaining)
+        ]
+    )
+    assert np.allclose(batch_lower, scalar_lower, rtol=0.0, atol=1e-12)
+
+    batch_prefix = cert.prefix_bound_batch(prefix, states, remaining)
+    scalar_prefix = np.array(
+        [
+            cert.prefix_bound(float(cost), state, float(time))
+            for cost, state, time in zip(prefix, states, remaining)
+        ]
+    )
+    assert np.allclose(batch_prefix, scalar_prefix, rtol=0.0, atol=1e-12)
+    assert np.isneginf(batch_prefix[2])
+
+
+def test_cell_slack_neighborhood_reports_boundary_and_halo_metadata():
+    cert = make_small_certificate(
+        iterations=2,
+        obstacles=((-0.5, 0.5, -0.5, 0.5),),
+    )
+    cert.build()
+    rows = cert.cell_slack_neighborhood(center=(3, 3, 3), radius=1)
+
+    assert len(rows) == 27
+    center = next(row for row in rows if row["is_center"])
+    assert center["cell"] == [3, 3, 3]
+    assert center["fully_inadmissible"]
+    assert not center["included_in_slack_gate"]
+    assert center["slack_lower_bound"] is None
+    assert all("boundary_distance_cells" in row for row in rows)
+    assert all("touches_safe_halo" in row for row in rows)
+    assert any(row["included_in_slack_gate"] for row in rows)
+    assert all(
+        len(row["lower"]) == 3 and len(row["upper"]) == 3
+        for row in rows
+    )
+
+
 def test_prefix_pruning_never_uses_an_uncorrected_certificate():
     cert = make_small_certificate(iterations=2)
     cert.build()

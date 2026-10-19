@@ -62,6 +62,8 @@ A built certificate reports:
 
 - epsilon: global running-slack feasibility tolerance;
 - epsilon_terminal: terminal feasibility tolerance;
+- epsilon_worst_cell: grid-cell index attaining the largest finite slack
+  violation, for diagnosing where epsilon originates;
 - bellman_monotone: every sweep improved or preserved the previous candidate;
 - discrete_subsolution: the raw Bellman operator still dominates the selected
   certificate at all finite admissible nodes.
@@ -83,9 +85,10 @@ unavailable corner falls back to the declared global value lower bound. In
 the radial-extension path, blocked nodes use that lower bound as interpolation
 surrogates, while the continuous baseline-plus-residual interpolant is
 explicitly included in the cellwise HJB-slack bound. Admissible nodes adjacent
-to blocked cells remain pinned to the global lower bound. Cells proven to lie
-wholly inside an obstacle are excluded from the HJB domain; ambiguous
-non-finite cells make the error gate infinite.
+to blocked cells remain pinned to the global lower bound. Admissible nodes
+without a usable Bellman successor fall back to the declared radial
+subsolution. Cells proven to lie wholly inside an obstacle are excluded from
+the HJB domain; ambiguous non-finite cells make the error gate infinite.
 
 The paper benchmark additionally supplies the analytic radial function as a
 global cost-to-go lower bound and as a continuous HJB subsolution outside the

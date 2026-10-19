@@ -221,12 +221,38 @@ def main() -> None:
                 "prefix_query_speedup": prefix_query_speedup,
                 "epsilon": report.epsilon,
                 "epsilon_coarse": float(certificate._epsilon_coarse),
+                "epsilon_coarse_worst_cell": (
+                    list(certificate._epsilon_coarse_worst_cell)
+                    if certificate._epsilon_coarse_worst_cell is not None
+                    else None
+                ),
                 "epsilon_refined_cells": int(certificate._epsilon_refined_cells),
+                "epsilon_refinement_budget": int(certificate._epsilon_refinement_budget),
+                "epsilon_refinement_budget_exhausted": bool(
+                    certificate._epsilon_refinement_budget_exhausted
+                ),
                 "epsilon_terminal": report.epsilon_terminal,
                 "epsilon_worst_cell": (
                     list(report.epsilon_worst_cell)
                     if report.epsilon_worst_cell is not None
                     else None
+                ),
+                "epsilon_worst_cell_coarse_lower_bound": (
+                    certificate._epsilon_coarse_cell_lowers.get(
+                        tuple(report.epsilon_worst_cell)
+                    )
+                    if report.epsilon_worst_cell is not None else None
+                ),
+                "epsilon_worst_cell_certified_lower_bound": (
+                    certificate._epsilon_final_cell_lowers.get(
+                        tuple(report.epsilon_worst_cell)
+                    )
+                    if report.epsilon_worst_cell is not None else None
+                ),
+                "epsilon_worst_cell_refined_in_certificate": (
+                    tuple(report.epsilon_worst_cell)
+                    in certificate._epsilon_refined_cell_set
+                    if report.epsilon_worst_cell is not None else None
                 ),
                 "epsilon_worst_cell_bounds": (
                     {

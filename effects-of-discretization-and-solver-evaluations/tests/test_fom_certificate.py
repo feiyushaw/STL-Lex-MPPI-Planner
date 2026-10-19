@@ -112,6 +112,56 @@ def test_cell_slack_diagnostics_decompose_bound_without_changing_epsilon():
     assert cert.epsilon == epsilon_before
 
 
+def test_global_epsilon_matches_the_final_bounds_used_for_pruning():
+    cert = make_small_certificate(iterations=2)
+    report = cert.build()
+
+    coarse_epsilon = max(
+        (max(0.0, -value) for value in cert._epsilon_coarse_cell_lowers.values()),
+        default=0.0,
+    )
+    final_epsilon = max(
+        (max(0.0, -value) for value in cert._epsilon_final_cell_lowers.values()),
+        default=0.0,
+    )
+    assert np.isclose(coarse_epsilon, cert._epsilon_coarse, atol=1e-12)
+    assert np.isclose(final_epsilon, report.epsilon, atol=1e-12)
+    assert report.epsilon_worst_cell is not None
+
+    worst = tuple(report.epsilon_worst_cell)
+    row = cert.cell_slack_neighborhood(center=worst, radius=0)[0]
+    assert row["is_reported_worst_cell"]
+    assert np.isclose(
+        row["coarse_slack_lower_bound"],
+        cert._epsilon_coarse_cell_lowers[worst],
+        atol=1e-12,
+    )
+    assert np.isclose(
+        row["slack_lower_bound"],
+        cert._epsilon_final_cell_lowers[worst],
+        atol=1e-12,
+    )
+    if row["refined_in_certificate"]:
+        components = row["slack_components"]
+        assert components is not None
+        assert np.isclose(
+            row["slack_lower_bound"],
+            max(
+                row["coarse_slack_lower_bound"],
+                components["refined"]["total_lower"],
+            ),
+            atol=1e-12,
+        )
+    else:
+        assert np.isclose(
+            row["slack_lower_bound"],
+            row["coarse_slack_lower_bound"],
+            atol=1e-12,
+        )
+    if report.epsilon > 0.0 and not cert._epsilon_refinement_budget_exhausted:
+        assert row["refined_in_certificate"]
+
+
 def test_refined_cell_slack_bound_is_no_weaker_than_coarse_bound():
     cert = make_small_certificate(iterations=2)
     cert.build()

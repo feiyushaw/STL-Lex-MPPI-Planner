@@ -965,7 +965,7 @@ class SemiLagrangianFOMCertificate:
                     cell_lowers[cell] = max(cell_lowers[cell], refined_lower)
                     refined_cells.add(cell)
 
-        # Spend a separate, small budget on a deeper 4x4x4 enclosure for
+        # Spend a separate, small budget on a deeper 4x4x2 enclosure for
         # the highest-impact cells already processed by the first refinement
         # level. This targets persistent local bottlenecks without multiplying
         # the cost of every cell in the global refinement set.

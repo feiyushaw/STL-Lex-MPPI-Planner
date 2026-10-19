@@ -104,6 +104,8 @@ class FOMCertificateProblem:
     terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
     terminal_cell_lower_bound: Optional[Callable[[Array, Array], float]] = None
     cell_is_fully_inadmissible: Optional[Callable[[Array, Array], bool]] = None
+    outside_domain_lower_bound: Optional[Callable[[Array], Array]] = None
+    outside_domain_is_subsolution: bool = False
     control_lipschitz_bound: Optional[Callable[[Array, "RegularGrid"], float]] = None
     cell_slack_lower_bound: Optional[
         Callable[[Array, "RegularGrid", tuple[int, ...]], float]
@@ -129,8 +131,10 @@ class SemiLagrangianFOMCertificate:
         T V(x) = inf_u { dt * ell(x,u) + V(x + dt f(x,u)) }.
 
     State constraints are fail-closed. Transitions into inadmissible states
-    are excluded; outside-grid and invalid-cell queries use a declared global
-    value lower bound so an unknown region can never look like +infinity cost.
+    are excluded. By default, outside-grid and invalid-cell queries use the
+    declared global value lower bound. A problem may instead supply a global
+    lower-bound extension that is itself a subsolution outside the grid; its
+    values anchor a narrow boundary strip and provide a continuous extension.
     """
 
     def __init__(
@@ -162,10 +166,19 @@ class SemiLagrangianFOMCertificate:
         ):
             raise ValueError("terminal_cost_lipschitz must be finite and non-negative")
 
+        if problem.outside_domain_lower_bound is not None and not (
+            problem.outside_domain_is_subsolution
+        ):
+            raise ValueError(
+                "outside_domain_lower_bound requires an explicit "
+                "outside_domain_is_subsolution declaration"
+            )
+
         self._node_admissible = np.asarray(
             problem.admissible(self.nodes), dtype=bool
         ).reshape(self.grid.shape)
         self._safe_zero_mask = self._make_safe_zero_mask()
+        self._boundary_anchor_mask = self._make_boundary_anchor_mask()
 
         initial_fn = (
             problem.initial_lower_bound
@@ -189,12 +202,12 @@ class SemiLagrangianFOMCertificate:
         self._discrete_subsolution = False
 
     def _make_safe_zero_mask(self) -> Array:
-        """Mask nodes adjacent to unknown/blocked cells and grid boundaries.
+        """Mask admissible nodes adjacent to blocked/unknown states.
 
-        The interpolant falls back to the declared global lower bound in any
-        cell touching a non-finite node. Setting all admissible corners of
-        those cells to that same lower bound prevents an upward jump at cell
-        boundaries.
+        When no certified outside-domain extension exists, the outer grid
+        boundary is also pinned to the global lower bound. With a certified
+        extension, the boundary is anchored to that extension instead, avoiding
+        an artificial jump from zero to a large interior value.
         """
         shape = self.grid.shape
         dim = len(shape)
@@ -218,23 +231,64 @@ class SemiLagrangianFOMCertificate:
                 if inside:
                     halo[tuple(neighbor)] = True
 
-        for axis in range(dim):
-            if axis in self.grid.periodic_axes:
-                continue
-            boundary = [slice(None)] * dim
-            boundary[axis] = 0
-            halo[tuple(boundary)] = True
-            boundary[axis] = -1
-            halo[tuple(boundary)] = True
+        if self.problem.outside_domain_lower_bound is None:
+            for axis in range(dim):
+                if axis in self.grid.periodic_axes:
+                    continue
+                boundary = [slice(None)] * dim
+                boundary[axis] = 0
+                halo[tuple(boundary)] = True
+                boundary[axis] = -1
+                halo[tuple(boundary)] = True
 
         return halo & self._node_admissible
 
+    def _make_boundary_anchor_mask(self) -> Array:
+        """Anchor the outer two node layers to the certified extension."""
+        shape = self.grid.shape
+        mask = np.zeros(shape, dtype=bool)
+        if self.problem.outside_domain_lower_bound is None:
+            return mask
+
+        for axis, size in enumerate(shape):
+            if axis in self.grid.periodic_axes:
+                continue
+            low = [slice(None)] * len(shape)
+            low[axis] = slice(0, min(2, size))
+            mask[tuple(low)] = True
+            high = [slice(None)] * len(shape)
+            high[axis] = slice(max(0, size - 2), size)
+            mask[tuple(high)] = True
+        return mask & self._node_admissible
+
+    def _evaluate_outside_domain_lower_bound(self, points: Array) -> Array:
+        points = np.asarray(points, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        if self.problem.outside_domain_lower_bound is None:
+            return np.full(
+                points.shape[0], self.problem.global_value_lower_bound, dtype=float
+            )
+        values = np.asarray(
+            self.problem.outside_domain_lower_bound(points), dtype=float
+        ).reshape(-1)
+        if values.size != points.shape[0] or not np.all(np.isfinite(values)):
+            raise ValueError(
+                "outside_domain_lower_bound must return one finite value per point"
+            )
+        return values
+
     def _apply_safe_domain(self, values: Array) -> Array:
         result = np.asarray(values, dtype=float).reshape(-1).copy()
-        result[~self._node_admissible.reshape(-1)] = np.inf
+        if np.any(self._boundary_anchor_mask):
+            anchor = self._boundary_anchor_mask.reshape(-1)
+            result[anchor] = self._evaluate_outside_domain_lower_bound(
+                self.nodes[anchor]
+            )
         result[self._safe_zero_mask.reshape(-1)] = (
             self.problem.global_value_lower_bound
         )
+        result[~self._node_admissible.reshape(-1)] = np.inf
         return result
 
     def _cell_corner_indices(self, cell: tuple[int, ...]):
@@ -300,6 +354,11 @@ class SemiLagrangianFOMCertificate:
                 valid &= (coords[:, axis] >= lo[axis]) & (coords[:, axis] <= hi[axis])
 
         out = np.full(n, self.problem.global_value_lower_bound, dtype=float)
+        outside = np.all(np.isfinite(coords), axis=1) & ~valid
+        if np.any(outside) and self.problem.outside_domain_lower_bound is not None:
+            out[outside] = self._evaluate_outside_domain_lower_bound(
+                coords[outside]
+            )
         if not np.any(valid):
             return out
 
@@ -964,6 +1023,8 @@ def make_paper_unicycle_problem(
         terminal_cell_intersects=terminal_cell_intersects,
         terminal_cell_lower_bound=terminal_cell_lower_bound,
         cell_is_fully_inadmissible=cell_is_fully_inadmissible,
+        outside_domain_lower_bound=terminal_cost,
+        outside_domain_is_subsolution=True,
         control_lipschitz_bound=control_lipschitz_bound,
         cell_slack_lower_bound=cell_slack_lower_bound,
     )

@@ -86,6 +86,12 @@ cellwise HJB-slack bound or terminal-cell bound, its corresponding error is
 infinite and pruning is disabled; sampled nodal finite differences are not
 treated as a continuous certificate proof.
 
+For custom Bolza problems, `global_value_lower_bound` must be a valid lower
+bound on every admissible cost-to-go, and `running_cost_lower_bound` must be a
+valid global lower bound on the running cost. Their zero defaults are valid
+for this benchmark because both costs are nonnegative; incorrect declarations
+would invalidate the certificate.
+
 `discrete_subsolution` is only a finite-grid diagnostic. It does not replace
 the continuous cellwise slack bound or terminal error accounting.
 

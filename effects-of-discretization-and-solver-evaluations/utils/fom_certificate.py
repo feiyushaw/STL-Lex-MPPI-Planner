@@ -103,6 +103,7 @@ class FOMCertificateProblem:
     terminal_cost_lipschitz: Optional[float] = None
     terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
     terminal_cell_lower_bound: Optional[Callable[[Array, Array], float]] = None
+    cell_is_fully_inadmissible: Optional[Callable[[Array, Array], bool]] = None
     control_lipschitz_bound: Optional[Callable[[Array, "RegularGrid"], float]] = None
     cell_slack_lower_bound: Optional[
         Callable[[Array, "RegularGrid", tuple[int, ...]], float]
@@ -521,6 +522,12 @@ class SemiLagrangianFOMCertificate:
             if not np.all(np.isfinite(corners)):
                 finite_corners = corners[np.isfinite(corners)]
                 if finite_corners.size == 0:
+                    lo, hi = self._cell_bounds(cell)
+                    if (
+                        self.problem.cell_is_fully_inadmissible is not None
+                        and self.problem.cell_is_fully_inadmissible(lo, hi)
+                    ):
+                        continue
                     return np.inf
                 if not np.allclose(
                     finite_corners,
@@ -782,6 +789,17 @@ def make_paper_unicycle_problem(
         # The terminal cost is exactly zero on the target set.
         return 0.0
 
+    def cell_is_fully_inadmissible(lo: Array, hi: Array) -> bool:
+        # An entire tensor cell contained in one obstacle has no admissible
+        # states, so the HJB slack constraint is not imposed on that cell.
+        for xmin, xmax, ymin, ymax in obstacles:
+            if (
+                lo[0] >= xmin and hi[0] <= xmax
+                and lo[1] >= ymin and hi[1] <= ymax
+            ):
+                return True
+        return False
+
     def control_lipschitz_bound(values: Array, grid: RegularGrid) -> float:
         shaped = np.asarray(values, dtype=float).reshape(grid.shape)
         next_heading = np.roll(shaped, -1, axis=2)
@@ -907,6 +925,7 @@ def make_paper_unicycle_problem(
         terminal_cost_lipschitz=None,
         terminal_cell_intersects=terminal_cell_intersects,
         terminal_cell_lower_bound=terminal_cell_lower_bound,
+        cell_is_fully_inadmissible=cell_is_fully_inadmissible,
         control_lipschitz_bound=control_lipschitz_bound,
         cell_slack_lower_bound=cell_slack_lower_bound,
     )

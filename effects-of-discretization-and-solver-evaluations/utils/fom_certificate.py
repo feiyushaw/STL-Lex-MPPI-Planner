@@ -116,6 +116,11 @@ class FOMCertificateProblem:
     cell_slack_lower_bound_refined: Optional[
         Callable[[Array, "RegularGrid", tuple[int, ...]], float]
     ] = None
+    # Diagnostic decomposition for the selected worst cell; does not affect
+    # the certificate gate or any bound used for pruning.
+    cell_slack_diagnostics: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], dict[str, object]]
+    ] = None
 
 
 @dataclass(frozen=True)
@@ -1234,6 +1239,16 @@ class SemiLagrangianFOMCertificate:
             boundary_distance = (
                 int(min(boundary_distances)) if boundary_distances else None
             )
+            slack_components = None
+            if (
+                not fully_blocked
+                and lower is not None
+                and self.problem.cell_slack_diagnostics is not None
+                and (cell == center or cell == self._epsilon_worst_cell)
+            ):
+                slack_components = self.problem.cell_slack_diagnostics(
+                    effective_values, self.grid, cell
+                )
             diagnostics.append(
                 {
                     "cell": list(cell),
@@ -1248,6 +1263,7 @@ class SemiLagrangianFOMCertificate:
                         not fully_blocked and lower is not None
                     ),
                     "slack_lower_bound": lower,
+                    "slack_components": slack_components,
                     "violation": max(0.0, -lower) if lower is not None else None,
                 }
             )
@@ -1401,8 +1417,10 @@ def make_paper_unicycle_problem(
         grid: RegularGrid,
         cell: tuple[int, int, int],
         subdivisions: int,
-    ) -> float:
-        """Conservative HJB-slack lower bound, optionally subdividing a cell."""
+        *,
+        return_components: bool = False,
+    ) -> float | dict[str, object]:
+        """Conservative HJB-slack bound, optionally with a term decomposition."""
         h = grid.spacing
         nodal_values = np.asarray(values, dtype=float).reshape(grid.shape)
         if np.any(~np.isfinite(nodal_values)):
@@ -1458,7 +1476,7 @@ def make_paper_unicycle_problem(
                     vals.append(float(fn(k * np.pi)))
             return min(vals), max(vals)
 
-        subcell_lowers = []
+        subcell_reports: list[dict[str, object]] = []
         for sub_index in product(range(subdivisions), repeat=3):
             frac_lo = np.asarray(sub_index, dtype=float) / subdivisions
             frac_hi = (np.asarray(sub_index, dtype=float) + 1.0) / subdivisions
@@ -1524,6 +1542,8 @@ def make_paper_unicycle_problem(
                 if d_min < goal_radius:
                     rgx0, rgx1 = min(rgx0, 0.0), max(rgx1, 0.0)
                     rgy0, rgy1 = min(rgy0, 0.0), max(rgy1, 0.0)
+            residual_grad_bounds = [tuple(bounds) for bounds in grad_bounds]
+            radial_grad_bounds = [(rgx0, rgx1), (rgy0, rgy1), (0.0, 0.0)]
             grad_bounds[0] = (
                 grad_bounds[0][0] + rgx0,
                 grad_bounds[0][1] + rgx1,
@@ -1548,10 +1568,13 @@ def make_paper_unicycle_problem(
             position_cost_lower = q_position * (
                 dx_cost * dx_cost + dy_cost * dy_cost
             )
-            position_transport_lower = forward_speed * (
-                product_lower(gx0, gx1, cos0, cos1)
-                + product_lower(gy0, gy1, sin0, sin1)
+            x_transport_lower = forward_speed * product_lower(
+                gx0, gx1, cos0, cos1
             )
+            y_transport_lower = forward_speed * product_lower(
+                gy0, gy1, sin0, sin1
+            )
+            position_transport_lower = x_transport_lower + y_transport_lower
 
             u_candidates = [
                 control_min,
@@ -1567,24 +1590,99 @@ def make_paper_unicycle_problem(
                     control_lower, r_control * uu * uu + gphi * uu
                 )
 
-            subcell_lowers.append(float(
-                position_cost_lower + position_transport_lower + control_lower
-            ))
+            total_lower = float(
+                position_cost_lower + x_transport_lower
+                + y_transport_lower + control_lower
+            )
+            subcell_reports.append(
+                {
+                    "subcell_index": [int(i) for i in sub_index],
+                    "subcell_bounds": {
+                        "lower": [float(v) for v in sub_lo],
+                        "upper": [float(v) for v in sub_hi],
+                    },
+                    "position_cost_lower": float(position_cost_lower),
+                    "x_transport_lower": float(x_transport_lower),
+                    "y_transport_lower": float(y_transport_lower),
+                    "position_transport_lower": float(position_transport_lower),
+                    "control_lower": float(control_lower),
+                    "total_lower": total_lower,
+                    "residual_gradient_intervals": [
+                        [float(lo), float(hi)]
+                        for lo, hi in residual_grad_bounds
+                    ],
+                    "radial_gradient_intervals": [
+                        [float(lo), float(hi)]
+                        for lo, hi in radial_grad_bounds
+                    ],
+                    "total_gradient_intervals": [
+                        [float(lo), float(hi)]
+                        for lo, hi in grad_bounds
+                    ],
+                    "heading_interval": [float(sub_lo[2]), float(sub_hi[2])],
+                    "cos_interval": [float(cos0), float(cos1)],
+                    "sin_interval": [float(sin0), float(sin1)],
+                }
+            )
 
         # The parent-cell infimum is the minimum over its subcells. Taking
         # the minimum of conservative subcell lower bounds is conservative
         # for the entire parent cell and tightens interval dependencies.
-        return float(min(subcell_lowers))
+        worst_subcell = min(
+            subcell_reports, key=lambda report: float(report["total_lower"])
+        )
+        if return_components:
+            return {
+                "subdivisions_per_axis": int(subdivisions),
+                "subcell_count": len(subcell_reports),
+                "worst_subcell_index": worst_subcell["subcell_index"],
+                "worst_subcell_bounds": worst_subcell["subcell_bounds"],
+                "position_cost_lower": worst_subcell["position_cost_lower"],
+                "x_transport_lower": worst_subcell["x_transport_lower"],
+                "y_transport_lower": worst_subcell["y_transport_lower"],
+                "position_transport_lower": worst_subcell["position_transport_lower"],
+                "control_lower": worst_subcell["control_lower"],
+                "total_lower": worst_subcell["total_lower"],
+                "residual_gradient_intervals": worst_subcell["residual_gradient_intervals"],
+                "radial_gradient_intervals": worst_subcell["radial_gradient_intervals"],
+                "total_gradient_intervals": worst_subcell["total_gradient_intervals"],
+                "heading_interval": worst_subcell["heading_interval"],
+                "cos_interval": worst_subcell["cos_interval"],
+                "sin_interval": worst_subcell["sin_interval"],
+            }
+        return float(worst_subcell["total_lower"])
 
     def cell_slack_lower_bound(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
     ) -> float:
-        return cell_slack_lower_bound_impl(values, grid, cell, subdivisions=1)
+        return float(
+            cell_slack_lower_bound_impl(values, grid, cell, subdivisions=1)
+        )
 
     def cell_slack_lower_bound_refined(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
     ) -> float:
-        return cell_slack_lower_bound_impl(values, grid, cell, subdivisions=2)
+        return float(
+            cell_slack_lower_bound_impl(values, grid, cell, subdivisions=2)
+        )
+
+    def cell_slack_diagnostics(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> dict[str, object]:
+        coarse = cell_slack_lower_bound_impl(
+            values, grid, cell, subdivisions=1, return_components=True
+        )
+        refined = cell_slack_lower_bound_impl(
+            values, grid, cell, subdivisions=2, return_components=True
+        )
+        assert isinstance(coarse, dict) and isinstance(refined, dict)
+        return {
+            "coarse": coarse,
+            "refined": refined,
+            "refinement_gain": float(
+                refined["total_lower"] - coarse["total_lower"]
+            ),
+        }
 
     return FOMCertificateProblem(
         dynamics=dynamics,
@@ -1607,6 +1705,7 @@ def make_paper_unicycle_problem(
         control_lipschitz_bound=control_lipschitz_bound,
         cell_slack_lower_bound=cell_slack_lower_bound,
         cell_slack_lower_bound_refined=cell_slack_lower_bound_refined,
+        cell_slack_diagnostics=cell_slack_diagnostics,
     )
 
 

@@ -57,27 +57,114 @@ def test_certificate_guided_igo_has_finite_feasible_incumbent():
     assert all(np.isfinite(r.incumbent_cost) for r in reports)
     assert solver.pruned_rollouts_total >= 0
 
+    # Recompute the returned trajectory independently. A pruned prefix must
+    # never be reported as a completed Bolza trajectory.
+    x = solver.x0.copy()
+    independent_cost = 0.0
+    for k in range(solver.horizon_steps):
+        u = best_control[:, k]
+        independent_cost += solver.problem.dt * float(
+            solver.problem.running_cost(x[None, :], u[None, :])[0]
+        )
+        x = x + solver.problem.dt * solver.problem.dynamics(
+            x[None, :], u[None, :]
+        )[0]
+        assert solver.problem.admissible(x[None, :])[0]
+    independent_cost += float(
+        solver.problem.terminal_cost(x[None, :])[0]
+    )
+    assert np.isclose(best_cost, independent_cost, rtol=1e-10, atol=1e-10)
+
+    # Reverse triangle inequality gives a model-independent lower bound for
+    # this constant-speed unicycle, including the nonnegative terminal cost.
+    initial_distance = float(np.linalg.norm(solver.x0[:2]))
+    dt = solver.problem.dt
+    speed = 1.0
+    running_lb = sum(
+        dt * max(initial_distance - speed * dt * k, 0.0) ** 2
+        for k in range(solver.horizon_steps)
+    )
+    final_distance_lb = max(
+        initial_distance - speed * dt * solver.horizon_steps, 0.0
+    )
+    terminal_lb = float(
+        solver.problem.terminal_cost(
+            np.array([[final_distance_lb, 0.0, 0.0]])
+        )[0]
+    )
+    assert best_cost >= running_lb + terminal_lb - 1e-8
+
 
 def test_certificate_prefix_bound_is_never_above_known_rollout_cost():
     cert = make_certificate(iterations=2)
     problem = cert.problem
-    x = np.array([1.0, 0.8, 0.0], dtype=float)
-    total = 0.0
+    x0 = np.array([1.0, 0.8, 0.0], dtype=float)
     horizon = 8
+    states = [x0.copy()]
+    stage_costs = []
+    x = x0.copy()
 
-    for k in range(horizon):
+    for _ in range(horizon):
         u = np.array([0.0], dtype=float)
-        total += problem.dt * float(
-            problem.running_cost(x[None, :], u[None, :])[0]
+        stage_costs.append(
+            problem.dt * float(
+                problem.running_cost(x[None, :], u[None, :])[0]
+            )
         )
         x = x + problem.dt * problem.dynamics(
             x[None, :], u[None, :]
         )[0]
+        assert problem.admissible(x[None, :])[0]
+        states.append(x.copy())
+
+    full_cost = sum(stage_costs) + float(
+        problem.terminal_cost(states[-1][None, :])[0]
+    )
+    prefix = 0.0
+    for k, stage in enumerate(stage_costs):
+        prefix += stage
         bound = cert.prefix_bound(
-            total,
-            x,
+            prefix,
+            states[k + 1],
             problem.dt * (horizon - k - 1),
         )
-        terminal = float(problem.terminal_cost(x[None, :])[0])
-        # The certificate is a lower bound on every feasible completion.
-        assert bound <= total + terminal + 1e-7
+        assert bound <= full_cost + 1e-7
+
+
+def test_pruned_prefixes_are_not_scored_or_used_as_elites():
+    cert = make_certificate(iterations=1)
+    solver = CertificateGuidedIGOSolver(
+        cert,
+        x0=np.array([1.5, -1.0, 0.0]),
+        horizon_steps=8,
+        n_samples=4,
+        n_iterations=1,
+        block_steps=4,
+        elite_quantile=0.5,
+        initial_std=0.25,
+        random_seed=11,
+    )
+    # Force the pruning branch to isolate the rollout bookkeeping invariant.
+    solver.incumbent_cost = -1.0e9
+    solver.certificate.prefix_bound = lambda *args: 1.0
+    controls = np.zeros((4, 1, 8), dtype=float)
+
+    _, costs, pruned, infeasible_count, completed_count = solver._rollout_batch(
+        controls
+    )
+    assert np.all(pruned)
+    assert infeasible_count == 0
+    assert completed_count == 0
+    assert np.all(np.isinf(costs))
+
+    mean_before = solver.mean.copy()
+    factors_before = [factor.copy() for factor in solver.factors]
+    selected = solver._update_distribution(
+        np.zeros((4, 1, 8), dtype=float), costs
+    )
+    assert selected == -1
+    assert np.array_equal(solver.mean, mean_before)
+    assert all(
+        np.array_equal(before, after)
+        for before, after in zip(factors_before, solver.factors)
+    )

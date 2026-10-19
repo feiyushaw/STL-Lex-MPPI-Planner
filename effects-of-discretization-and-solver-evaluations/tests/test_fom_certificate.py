@@ -76,7 +76,7 @@ def test_certified_radial_extension_anchors_boundary_and_outside_queries():
     assert np.allclose(values[0, :, :], radial[0, :, :])
     assert np.allclose(values[-1, :, :], radial[-1, :, :])
     assert np.all(values[1, :, :] >= radial[1, :, :] - 1e-12)
-    assert not np.any(cert._safe_zero_mask[0, :, :])
+    assert not np.any(cert._obstacle_halo_mask[0, :, :])
 
     outside = np.array([2.5, 0.0, 0.0])
     expected = cert.problem.terminal_cost(outside[None, :])[0]
@@ -92,7 +92,7 @@ def test_certified_radial_extension_does_not_pin_obstacle_halo_to_zero():
     report = cert.build()
     values = cert.values[-1].reshape(cert.grid.shape)
     radial = cert._domain_baseline_nodes.reshape(cert.grid.shape)
-    halo = cert._safe_zero_mask & cert._node_admissible.reshape(cert.grid.shape)
+    halo = cert._obstacle_halo_mask & cert._node_admissible.reshape(cert.grid.shape)
     positive_baseline_halo = halo & (radial > 1e-8)
 
     assert np.any(positive_baseline_halo)

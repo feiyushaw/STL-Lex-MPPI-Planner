@@ -84,6 +84,27 @@ def test_certified_radial_extension_anchors_boundary_and_outside_queries():
     assert np.isfinite(cert.corrected_lower_bound(outside, 0.5))
 
 
+def test_refined_cell_slack_bound_is_no_weaker_than_coarse_bound():
+    cert = make_small_certificate(iterations=2)
+    cert.build()
+
+    assert np.isfinite(cert._epsilon_coarse)
+    assert cert.epsilon <= cert._epsilon_coarse + 1e-10
+    assert cert.problem.cell_slack_lower_bound_refined is not None
+
+    cell = cert._epsilon_worst_cell or (0, 4, 2)
+    values = cert._effective_extension_values(cert.values[-1])
+    coarse = cert.problem.cell_slack_lower_bound(values, cert.grid, cell)
+    refined = cert.problem.cell_slack_lower_bound_refined(
+        values, cert.grid, cell
+    )
+    assert np.isfinite(coarse)
+    assert np.isfinite(refined)
+    # Subdivision tightens interval enclosures. The refined result remains a
+    # lower bound on the whole parent cell and must not be weaker.
+    assert refined >= coarse - 1e-9
+
+
 def test_radial_extension_uses_nearest_residual_at_blocked_nodes():
     cert = make_small_certificate(
         iterations=2,

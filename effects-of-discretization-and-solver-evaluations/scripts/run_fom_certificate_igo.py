@@ -78,6 +78,12 @@ def main() -> None:
         type=int,
         default=[0, 50, 300],
     )
+    parser.add_argument(
+        "--certificate-refinement-budget",
+        type=int,
+        default=256,
+        help="maximum cells to refine for the continuous HJB slack bound",
+    )
     parser.add_argument("--n-samples", type=int, default=500)
     parser.add_argument("--n-iterations", type=int, default=20)
     parser.add_argument(
@@ -100,6 +106,8 @@ def main() -> None:
         default=ROOT / "outputs" / "fom_certificate_igo",
     )
     args = parser.parse_args()
+    if args.certificate_refinement_budget < 0:
+        parser.error("--certificate-refinement-budget must be non-negative")
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +157,7 @@ def main() -> None:
             problem,
             grid,
             iterations=capacity,
+            refinement_budget=args.certificate_refinement_budget,
         )
         certificate_build_started = time.perf_counter()
         report = certificate.build()
@@ -225,6 +234,22 @@ def main() -> None:
                     list(certificate._epsilon_coarse_worst_cell)
                     if certificate._epsilon_coarse_worst_cell is not None
                     else None
+                ),
+                "epsilon_refined_worst_cell": (
+                    list(certificate._epsilon_refined_worst_cell)
+                    if certificate._epsilon_refined_worst_cell is not None
+                    else None
+                ),
+                "epsilon_refined_worst_violation": float(
+                    certificate._epsilon_refined_worst_violation
+                ),
+                "epsilon_unrefined_worst_cell": (
+                    list(certificate._epsilon_unrefined_worst_cell)
+                    if certificate._epsilon_unrefined_worst_cell is not None
+                    else None
+                ),
+                "epsilon_unrefined_worst_violation": float(
+                    certificate._epsilon_unrefined_worst_violation
                 ),
                 "epsilon_refined_cells": int(certificate._epsilon_refined_cells),
                 "epsilon_refinement_budget": int(certificate._epsilon_refinement_budget),

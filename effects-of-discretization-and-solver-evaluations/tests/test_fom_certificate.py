@@ -84,6 +84,29 @@ def test_certified_radial_extension_anchors_boundary_and_outside_queries():
     assert np.isfinite(cert.corrected_lower_bound(outside, 0.5))
 
 
+def test_certified_radial_extension_does_not_pin_obstacle_halo_to_zero():
+    cert = make_small_certificate(
+        iterations=2,
+        obstacles=((-1.0, 1.0, -0.4, 0.4),),
+    )
+    report = cert.build()
+    values = cert.values[-1].reshape(cert.grid.shape)
+    radial = cert._domain_baseline_nodes.reshape(cert.grid.shape)
+    halo = cert._safe_zero_mask & cert._node_admissible.reshape(cert.grid.shape)
+    positive_baseline_halo = halo & (radial > 1e-8)
+
+    assert np.any(positive_baseline_halo)
+    # The continuous-extension path tapers Bellman residuals but must not
+    # overwrite these nodes with zero after tapering. This avoids an artificial
+    # zero-vs-radial jump at cells adjacent to the obstacle halo.
+    assert np.all(
+        values[positive_baseline_halo]
+        >= radial[positive_baseline_halo] - 1e-10
+    )
+    assert np.isfinite(report.epsilon)
+    assert np.isfinite(report.epsilon_terminal)
+
+
 def test_control_lipschitz_bound_scales_running_cost_derivative_by_dt():
     cert = make_small_certificate(iterations=0)
     problem = cert.problem
@@ -283,7 +306,7 @@ def test_cell_slack_neighborhood_reports_boundary_and_halo_metadata():
     assert not center["included_in_slack_gate"]
     assert center["slack_lower_bound"] is None
     assert all("boundary_distance_cells" in row for row in rows)
-    assert all("touches_safe_halo" in row for row in rows)
+    assert all("touches_obstacle_halo" in row for row in rows)
     assert any(row["included_in_slack_gate"] for row in rows)
     assert all(
         len(row["lower"]) == 3 and len(row["upper"]) == 3

@@ -26,7 +26,7 @@ For the benchmark in Section V-A/B:
 - dynamics are the constant-speed unicycle;
 - running cost is q_p ||p-p_g||^2 + r_u u^2;
 - terminal cost is the radial warm start
-  v_rad = q_p (d-rho)^3 / (3 v_bar) outside the target and zero inside;
+  v_rad = q_p (d^3-rho^3) / (3 v_bar) for d > rho and zero inside;
 - heading is periodic;
 - obstacles are represented as inadmissible state regions;
 - certificate tightening is semi-Lagrangian value iteration;
@@ -51,8 +51,10 @@ cellwise derivative intervals, exact trigonometric intervals, the exact
 position-cell minimum, and continuous minimization of the quadratic control
 term are used to obtain a one-sided slack bound.
 
-The terminal error is computed over all grid cells intersecting the target,
-rather than treating only target grid nodes as a global check.
+The terminal error is bounded over all grid cells intersecting the target,
+rather than treating only target grid nodes as a global check. The radial
+terminal-cell lower bound is zero because the terminal cost is zero on the
+target set.
 
 ## Certificate invariants
 
@@ -66,7 +68,26 @@ A built certificate reports:
 
 A certificate is not considered valid for pruning merely because the grid
 backup succeeded. The corrected lower bound is the object used by the primal
-search.
+search. The finite-control correction uses the Lipschitz constant of
+dt*ell(x,u) + v(x + dt*f(x,u)); the running-cost derivative therefore carries
+the same dt factor as the state-transition term.
+
+For K = 0, the benchmark uses the analytic radial function directly, not its
+grid interpolation. Its zero feasibility errors are asserted only because the
+benchmark explicitly declares that function to be a continuous HJB
+subsolution and the same function is the terminal cost.
+
+For K > 0, an interpolation cell with a non-finite corner is never repaired by
+renormalizing the remaining corners. Such cells use the declared global value
+lower bound, and the admissible nodes adjacent to blocked cells and the outer
+grid boundary are pinned to that same lower bound. Queries without a finite
+certificate value disable pruning. If a problem does not provide a rigorous
+cellwise HJB-slack bound or terminal-cell bound, its corresponding error is
+infinite and pruning is disabled; sampled nodal finite differences are not
+treated as a continuous certificate proof.
+
+`discrete_subsolution` is only a finite-grid diagnostic. It does not replace
+the continuous cellwise slack bound or terminal error accounting.
 
 ## IGO integration
 

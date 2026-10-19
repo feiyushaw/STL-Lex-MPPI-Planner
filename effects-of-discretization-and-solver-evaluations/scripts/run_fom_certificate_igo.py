@@ -105,6 +105,30 @@ def main() -> None:
                 "certificate_iterations": capacity,
                 "epsilon": report.epsilon,
                 "epsilon_terminal": report.epsilon_terminal,
+                "epsilon_worst_cell": (
+                    list(report.epsilon_worst_cell)
+                    if report.epsilon_worst_cell is not None
+                    else None
+                ),
+                "epsilon_worst_cell_bounds": (
+                    {
+                        "lower": (
+                            grid.lower
+                            + np.asarray(report.epsilon_worst_cell, dtype=float)
+                            * grid.spacing
+                        ).tolist(),
+                        "upper": (
+                            grid.lower
+                            + (
+                                np.asarray(report.epsilon_worst_cell, dtype=float)
+                                + 1.0
+                            )
+                            * grid.spacing
+                        ).tolist(),
+                    }
+                    if report.epsilon_worst_cell is not None
+                    else None
+                ),
                 "grid_nodes": report.grid_nodes,
                 "admissible_nodes": report.admissible_nodes,
                 "bellman_monotone": report.bellman_monotone,

@@ -239,6 +239,12 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_worst_cell: Optional[tuple[int, ...]] = None
         self._epsilon_coarse = 0.0
         self._epsilon_refined_cells = 0
+        self._epsilon_coarse_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_coarse_cell_lowers: dict[tuple[int, ...], float] = {}
+        self._epsilon_final_cell_lowers: dict[tuple[int, ...], float] = {}
+        self._epsilon_refined_cell_set: set[tuple[int, ...]] = set()
+        self._epsilon_refinement_budget = 256
+        self._epsilon_refinement_budget_exhausted = False
         self._bellman_monotone = True
         self._discrete_subsolution = False
 

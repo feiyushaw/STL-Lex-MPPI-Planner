@@ -173,6 +173,23 @@ def main() -> None:
             if report.epsilon_worst_cell is not None
             else []
         )
+        obstacle_extension_mode = (
+            "nearest_admissible_residual"
+            if certificate._domain_baseline_nodes is not None
+            else "global_lower_bound_fail_closed"
+        )
+        blocked_mask = ~certificate._node_admissible
+        obstacle_extension_residual_abs_max = 0.0
+        if certificate._domain_baseline_nodes is not None and np.any(blocked_mask):
+            extended_values = certificate._effective_extension_values(
+                certificate.values[-1]
+            ).reshape(grid.shape)
+            extension_residual = (
+                extended_values - certificate._domain_baseline_nodes
+            )
+            obstacle_extension_residual_abs_max = float(
+                np.max(np.abs(extension_residual[blocked_mask]))
+            )
 
         solver = CertificateGuidedIGOSolver(
             certificate,
@@ -193,6 +210,9 @@ def main() -> None:
         rows.append(
             {
                 "certificate_iterations": capacity,
+                "obstacle_extension_mode": obstacle_extension_mode,
+                "obstacle_extension_blocked_nodes": int(np.count_nonzero(blocked_mask)),
+                "obstacle_extension_residual_abs_max": obstacle_extension_residual_abs_max,
                 "certificate_build_seconds": certificate_build_seconds,
                 "igo_solve_seconds": igo_solve_seconds,
                 "completed_rollouts": solver.evaluated_rollouts_total,

@@ -867,41 +867,109 @@ class SemiLagrangianFOMCertificate:
             raise RuntimeError("build() must be called before reading epsilon_terminal")
         return self._epsilon_terminal
 
-    def value(self, state: Sequence[float]) -> float:
+    def value_batch(self, states: Array) -> Array:
+        """Evaluate certificate values for a batch of states.
+
+        This is numerically equivalent to repeated :meth:`value` calls, but
+        performs interpolation in one vectorized pass. In certificate-guided
+        IGO, pruning queries dominate the rollout loop, so batching avoids
+        hundreds of thousands of Python-level scalar interpolation calls.
+        """
         if not self._built:
             raise RuntimeError("build() must be called before querying a certificate")
-        point = np.asarray(state, dtype=float).reshape(-1)
-        if point.size != len(self.grid.shape):
+        points = np.asarray(states, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        if points.ndim != 2 or points.shape[1] != len(self.grid.shape):
             raise ValueError("state dimension does not match certificate grid")
-        if not bool(self.problem.admissible(point[None, :])[0]):
-            return np.inf
+
+        result = np.full(points.shape[0], np.inf, dtype=float)
+        admissible = np.asarray(
+            self.problem.admissible(points), dtype=bool
+        ).reshape(-1)
+        if not np.any(admissible):
+            return result
+
+        valid_points = points[admissible]
         if self.iterations == 0 and self._has_exact_initial_subsolution():
             initial_fn = (
                 self.problem.initial_lower_bound
                 if self.problem.initial_lower_bound is not None
                 else self.problem.terminal_cost
             )
-            value = np.asarray(initial_fn(point[None, :]), dtype=float).reshape(-1)
-            return float(value[0]) if value.size else -np.inf
-        return float(self._interpolate(self.values[-1], point)[0])
+            values = np.asarray(initial_fn(valid_points), dtype=float).reshape(-1)
+        else:
+            values = self._interpolate(self.values[-1], valid_points)
+        if values.size != valid_points.shape[0]:
+            raise ValueError("certificate value function returned an invalid batch size")
+        result[admissible] = values
+        return result
+
+    def value(self, state: Sequence[float]) -> float:
+        point = np.asarray(state, dtype=float).reshape(-1)
+        if point.size != len(self.grid.shape):
+            raise ValueError("state dimension does not match certificate grid")
+        return float(self.value_batch(point)[0])
+
+    def corrected_lower_bound_batch(
+        self, states: Array, remaining_time: float | Array
+    ) -> Array:
+        """Vectorized corrected lower bound; unavailable values disable pruning."""
+        points = np.asarray(states, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        if points.ndim != 2 or points.shape[1] != len(self.grid.shape):
+            raise ValueError("state dimension does not match certificate grid")
+        remaining = np.asarray(remaining_time, dtype=float)
+        if remaining.ndim == 0:
+            remaining = np.full(points.shape[0], float(remaining), dtype=float)
+        else:
+            remaining = remaining.reshape(-1)
+            if remaining.size != points.shape[0]:
+                raise ValueError("remaining_time must be scalar or match the state batch")
+        if np.any(~np.isfinite(remaining)) or np.any(remaining < 0.0):
+            raise ValueError("remaining_time must be finite and non-negative")
+
+        result = np.full(points.shape[0], -np.inf, dtype=float)
+        if not np.isfinite(self.epsilon) or not np.isfinite(self.epsilon_terminal):
+            return result
+        values = self.value_batch(points)
+        usable = np.isfinite(values)
+        result[usable] = (
+            values[usable]
+            - self.epsilon * remaining[usable]
+            - self.epsilon_terminal
+        )
+        return result
 
     def corrected_lower_bound(
         self, state: Sequence[float], remaining_time: float
     ) -> float:
-        if remaining_time < 0.0:
-            raise ValueError("remaining_time must be non-negative")
-        value = self.value(state)
-        # Non-finite means no usable certificate value, never an infinite
-        # lower bound. Disable pruning for such a query.
-        if not np.isfinite(value):
-            return -np.inf
-        if not np.isfinite(self.epsilon) or not np.isfinite(self.epsilon_terminal):
-            return -np.inf
-        return (
-            value
-            - self.epsilon * float(remaining_time)
-            - self.epsilon_terminal
-        )
+        point = np.asarray(state, dtype=float).reshape(-1)
+        return float(self.corrected_lower_bound_batch(point, remaining_time)[0])
+
+    def prefix_bound_batch(
+        self,
+        prefix_cost: float | Array,
+        states: Array,
+        remaining_time: float | Array,
+    ) -> Array:
+        """Vectorized prefix bound for IGO rollouts."""
+        points = np.asarray(states, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        prefix = np.asarray(prefix_cost, dtype=float)
+        if prefix.ndim == 0:
+            prefix = np.full(points.shape[0], float(prefix), dtype=float)
+        else:
+            prefix = prefix.reshape(-1)
+            if prefix.size != points.shape[0]:
+                raise ValueError("prefix_cost must be scalar or match the state batch")
+        corrected = self.corrected_lower_bound_batch(points, remaining_time)
+        result = np.full(points.shape[0], -np.inf, dtype=float)
+        usable = np.isfinite(prefix) & np.isfinite(corrected)
+        result[usable] = prefix[usable] + corrected[usable]
+        return result
 
     def prefix_bound(
         self,
@@ -909,9 +977,144 @@ class SemiLagrangianFOMCertificate:
         state: Sequence[float],
         remaining_time: float,
     ) -> float:
-        return float(prefix_cost) + self.corrected_lower_bound(
-            state, remaining_time
+        return float(
+            self.prefix_bound_batch(prefix_cost, np.asarray(state, dtype=float), remaining_time)[0]
         )
+
+    def cell_slack_neighborhood(
+        self,
+        center: Optional[tuple[int, ...]] = None,
+        *,
+        radius: int = 1,
+    ) -> list[dict[str, object]]:
+        """Return auditable slack bounds around a cell without changing the gate.
+
+        This is diagnostic-only: it reports every nearby cell, including
+        cells excluded because they are wholly inadmissible. It never changes
+        epsilon or the set of cells used by :meth:`_estimate_slack_error`.
+        """
+        if not self._built:
+            raise RuntimeError("build() must be called before cell diagnostics")
+        if isinstance(radius, bool) or int(radius) != radius or radius < 0:
+            raise ValueError("radius must be a non-negative integer")
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
+        )
+        if center is None:
+            center = self._epsilon_worst_cell
+        if center is None:
+            raise ValueError("no worst cell is available; pass an explicit center")
+        center = tuple(int(i) for i in center)
+        if len(center) != len(cell_shape) or any(
+            i < 0 or i >= cell_shape[axis] for axis, i in enumerate(center)
+        ):
+            raise ValueError("center cell is outside the certificate grid")
+
+        selected = self.values[-1]
+        has_extension = self.problem.outside_domain_lower_bound is not None
+        effective_values = (
+            np.where(
+                np.isfinite(selected),
+                selected,
+                self.problem.global_value_lower_bound,
+            )
+            if has_extension
+            else selected
+        )
+        offsets = range(-int(radius), int(radius) + 1)
+        indices: set[tuple[int, ...]] = set()
+        for delta in product(offsets, repeat=len(cell_shape)):
+            cell = []
+            valid = True
+            for axis, (index, shift) in enumerate(zip(center, delta)):
+                candidate = index + shift
+                if axis in self.grid.periodic_axes:
+                    candidate %= cell_shape[axis]
+                elif candidate < 0 or candidate >= cell_shape[axis]:
+                    valid = False
+                    break
+                cell.append(candidate)
+            if valid:
+                indices.add(tuple(cell))
+
+        diagnostics: list[dict[str, object]] = []
+        for cell in sorted(indices):
+            lo, hi = self._cell_bounds(cell)
+            fully_blocked = bool(
+                self.problem.cell_is_fully_inadmissible is not None
+                and self.problem.cell_is_fully_inadmissible(lo, hi)
+            )
+            corners = self._cell_corner_values(selected, cell)
+            lower: Optional[float]
+            if fully_blocked:
+                lower = None
+            elif self.problem.cell_slack_lower_bound is None:
+                lower = None
+            elif has_extension:
+                raw_lower = float(
+                    self.problem.cell_slack_lower_bound(
+                        effective_values, self.grid, cell
+                    )
+                )
+                lower = raw_lower if np.isfinite(raw_lower) else None
+            elif not np.all(np.isfinite(corners)):
+                finite_corners = corners[np.isfinite(corners)]
+                if finite_corners.size and np.allclose(
+                    finite_corners,
+                    self.problem.global_value_lower_bound,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    lower = float(self.problem.running_cost_lower_bound)
+                else:
+                    lower = None
+            else:
+                raw_lower = float(
+                    self.problem.cell_slack_lower_bound(
+                        selected, self.grid, cell
+                    )
+                )
+                lower = raw_lower if np.isfinite(raw_lower) else None
+
+            corner_indices = list(self._cell_corner_indices(cell))
+            touches_halo = any(
+                self._safe_zero_mask[index] for index in corner_indices
+            )
+            boundary_distances = [
+                min(cell[axis], cell_shape[axis] - 1 - cell[axis])
+                for axis in range(len(cell_shape))
+                if axis not in self.grid.periodic_axes
+            ]
+            boundary_distance = (
+                int(min(boundary_distances)) if boundary_distances else None
+            )
+            diagnostics.append(
+                {
+                    "cell": list(cell),
+                    "is_center": cell == center,
+                    "is_reported_worst_cell": cell == self._epsilon_worst_cell,
+                    "lower": lo.tolist(),
+                    "upper": hi.tolist(),
+                    "boundary_distance_cells": boundary_distance,
+                    "touches_safe_halo": bool(touches_halo),
+                    "fully_inadmissible": fully_blocked,
+                    "included_in_slack_gate": bool(
+                        not fully_blocked and lower is not None
+                    ),
+                    "slack_lower_bound": lower,
+                    "violation": max(0.0, -lower) if lower is not None else None,
+                }
+            )
+        diagnostics.sort(
+            key=lambda row: (
+                row["slack_lower_bound"] is None,
+                row["slack_lower_bound"]
+                if row["slack_lower_bound"] is not None
+                else 0.0,
+            )
+        )
+        return diagnostics
 
 
 def radial_terminal_cost(

@@ -157,6 +157,7 @@ class SemiLagrangianFOMCertificate:
         *,
         iterations: int = 0,
         monotone_start: bool = True,
+        refinement_budget: int = 256,
     ) -> None:
         if problem.dt <= 0.0:
             raise ValueError("certificate dt must be positive")
@@ -169,6 +170,9 @@ class SemiLagrangianFOMCertificate:
         self.iterations = int(iterations)
         if self.iterations < 0:
             raise ValueError("iterations must be non-negative")
+        self.refinement_budget = int(refinement_budget)
+        if self.refinement_budget < 0:
+            raise ValueError("refinement_budget must be non-negative")
         if not np.isfinite(problem.global_value_lower_bound):
             raise ValueError("global_value_lower_bound must be finite")
         if not np.isfinite(problem.running_cost_lower_bound):
@@ -243,7 +247,7 @@ class SemiLagrangianFOMCertificate:
         self._epsilon_coarse_cell_lowers: dict[tuple[int, ...], float] = {}
         self._epsilon_final_cell_lowers: dict[tuple[int, ...], float] = {}
         self._epsilon_refined_cell_set: set[tuple[int, ...]] = set()
-        self._epsilon_refinement_budget = 256
+        self._epsilon_refinement_budget = self.refinement_budget
         self._epsilon_refinement_budget_exhausted = False
         self._bellman_monotone = True
         self._discrete_subsolution = False

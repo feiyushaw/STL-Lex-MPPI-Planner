@@ -106,6 +106,14 @@ def main() -> None:
             "transport and control terms at a common anchor state"
         ),
     )
+    parser.add_argument(
+        "--certificate-heading-extremum-enclosure",
+        action="store_true",
+        help=(
+            "enable analytic minimization of the combined x/y transport "
+            "term over one common heading interval"
+        ),
+    )
     parser.add_argument("--n-samples", type=int, default=500)
     parser.add_argument("--n-iterations", type=int, default=20)
     parser.add_argument(
@@ -158,6 +166,7 @@ def main() -> None:
             args.certificate_deep_refinement_subdivisions
         ),
         joint_extremum_enclosure=args.certificate_joint_extremum_enclosure,
+        heading_extremum_enclosure=args.certificate_heading_extremum_enclosure,
     )
     grid = RegularGrid(
         lower=np.array([-5.0, -5.0, -np.pi]),
@@ -259,6 +268,9 @@ def main() -> None:
                 ),
                 "joint_extremum_enclosure_enabled": bool(
                     args.certificate_joint_extremum_enclosure
+                ),
+                "heading_extremum_enclosure_enabled": bool(
+                    args.certificate_heading_extremum_enclosure
                 ),
                 "obstacle_extension_mode": obstacle_extension_mode,
                 "obstacle_extension_blocked_nodes": int(np.count_nonzero(blocked_mask)),

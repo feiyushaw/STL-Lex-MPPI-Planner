@@ -22,13 +22,19 @@ radial baseline at sampled subcell points.
 - The residual gradient is reconstructed from the eight parent-cell nodal
   residuals, independently of the production interval-bound loop.
 - For each tested subcell, the reported residual-gradient intervals are checked
-  against independently reconstructed values at all eight parent-cell corners.
-  Since each trilinear derivative is bilinear in the other two coordinates,
-  these corner values test the claimed exact extrema of the residual-gradient
-  enclosure (including periodic-heading index wrapping).
+  against independently reconstructed gradients at that same subcell's eight
+  corners. Each trilinear derivative is bilinear in the other two coordinates
+  and independent of the differentiated coordinate, so its extrema over the
+  subcell occur at the endpoint combinations of the other two coordinates.
+  The independent evaluator maps subcell corners back into parent-cell
+  coordinates, including periodic-heading index wrapping.
 - The radial-gradient interval is checked separately at every sampled point;
   total-gradient containment alone could otherwise hide an overly narrow
-  component interval behind slack in the other component.
+  component interval behind slack in the other component. For the implemented
+  baseline V_rad = (q_position / (3 v_bar)) max(d^3 - rho^3, 0), where
+  d = ||p - goal||, its gradient is zero for d < rho and
+  (q_position / v_bar) d (p - goal) for d > rho. The derivative is
+  discontinuous at d = rho, so exact kink samples are skipped.
 - Samples include subcell interiors and faces for all 32 deep subcells in the
   configured `4 x 4 x 2` subdivision.
 - The total gradient is reconstructed as residual gradient plus the radial
@@ -61,7 +67,7 @@ gradient, and interval if a containment check fails.
 
 ## Interpretation and next gates
 
-Passing the parent-corner residual-extrema checks and sampled radial/total
+Passing the subcell-corner residual-extrema checks and sampled radial/total
 coverage is necessary but not sufficient for a formal continuous-domain
 guarantee. The proof still needs to rely on the structure of
 the trilinear derivative (bilinear in the other two coordinates, whose extrema

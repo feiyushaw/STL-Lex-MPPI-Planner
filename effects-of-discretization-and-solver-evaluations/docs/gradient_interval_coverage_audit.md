@@ -13,7 +13,7 @@ oracle tests validate the scalar minimizer given a gradient box; they do not
 independently validate construction of the gradient boxes.
 
 This change exposes the already-computed per-subcell reports through the
-diagnostic-only \`cell_slack_diagnostics(...)\` result and adds tests that
+diagnostic-only `cell_slack_diagnostics(...)` result and adds tests that
 independently evaluate the gradient of the trilinear residual and the analytic
 radial baseline at sampled subcell points.
 
@@ -22,7 +22,7 @@ radial baseline at sampled subcell points.
 - The residual gradient is reconstructed from the eight parent-cell nodal
   residuals, independently of the production interval-bound loop.
 - Samples include subcell interiors and faces for all 32 deep subcells in the
-  configured \`4 x 4 x 2\` subdivision.
+  configured `4 x 4 x 2` subdivision.
 - The total gradient is reconstructed as residual gradient plus the radial
   baseline gradient, and each sampled component must lie within the reported
   total-gradient interval.
@@ -39,14 +39,14 @@ proof that an interval contains every point of the continuous domain.
 
 ## Reproduction
 
-From \`effects-of-discretization-and-solver-evaluations\`:
+From `effects-of-discretization-and-solver-evaluations`:
 
-\`\`\`bash
-python -m pytest -q \\
-  tests/test_fom_certificate.py \\
-  tests/test_fom_certificate_igo.py \\
+```bash
+python -m pytest -q \
+  tests/test_fom_certificate.py \
+  tests/test_fom_certificate_igo.py \
   tests/test_fom_igo_solver.py
-\`\`\`
+```
 
 The tests report the obstacle layout, parent cell, subcell, sampled state,
 gradient, and interval if a containment check fails.

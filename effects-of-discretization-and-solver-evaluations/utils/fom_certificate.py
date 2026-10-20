@@ -1463,6 +1463,7 @@ def make_paper_unicycle_problem(
     dt: float,
     obstacles: Sequence[tuple[float, float, float, float]] = (),
     n_controls: int = 21,
+    deep_refinement_subdivisions: Sequence[int] = (4, 4, 2),
 ) -> FOMCertificateProblem:
     """Construct the Section V-A constant-speed unicycle problem.
 
@@ -1478,6 +1479,25 @@ def make_paper_unicycle_problem(
         raise ValueError("control_max must exceed control_min")
     if n_controls < 2:
         raise ValueError("n_controls must be at least two")
+    try:
+        raw_deep_subdivisions = tuple(deep_refinement_subdivisions)
+    except TypeError as exc:
+        raise ValueError(
+            "deep_refinement_subdivisions must contain three positive integers"
+        ) from exc
+    if (
+        len(raw_deep_subdivisions) != 3
+        or any(
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or int(value) < 1
+            for value in raw_deep_subdivisions
+        )
+    ):
+        raise ValueError(
+            "deep_refinement_subdivisions must contain three positive integers"
+        )
+    deep_subdivisions = tuple(int(value) for value in raw_deep_subdivisions)
 
     controls = np.linspace(
         control_min, control_max, n_controls, dtype=float
@@ -1845,13 +1865,12 @@ def make_paper_unicycle_problem(
     def cell_slack_lower_bound_deep(
         values: Array, grid: RegularGrid, cell: tuple[int, int, int]
     ) -> float:
-        # The dominant control contribution depends on dV/dphi, whose
-        # trilinear interval varies with x/y but not within the parent cell's
-        # phi coordinate. Spend more subdivisions spatially (4x4) and retain
-        # a 2-way heading split to tighten transport intervals at lower cost.
+        # The default (4, 4, 2) spends more subdivisions spatially because
+        # dV/dphi varies with x/y inside the trilinear cell. The configurable
+        # shape supports controlled deeper-refinement experiments.
         return float(
             cell_slack_lower_bound_impl(
-                values, grid, cell, subdivisions=(4, 4, 2)
+                values, grid, cell, subdivisions=deep_subdivisions
             )
         )
 
@@ -1865,7 +1884,9 @@ def make_paper_unicycle_problem(
             values, grid, cell, subdivisions=2, return_components=True
         )
         deep = cell_slack_lower_bound_impl(
-            values, grid, cell, subdivisions=(4, 4, 2), return_components=True
+            values, grid, cell,
+            subdivisions=deep_subdivisions,
+            return_components=True,
         )
         assert (
             isinstance(coarse, dict)

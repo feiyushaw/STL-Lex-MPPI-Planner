@@ -984,27 +984,34 @@ def test_reported_gradient_intervals_cover_dense_subcell_samples(
                 assert np.all(np.isfinite(bounds)), (name, bounds)
                 assert np.all(bounds[:, 0] <= bounds[:, 1]), (name, bounds)
 
-            # The derivative of a trilinear interpolant is bilinear in the
-            # other two coordinates. Its exact extrema over the parent cell
-            # are attained at corners of those two coordinates. Reconstruct
-            # these independently and require the residual interval to enclose
-            # all eight corner evaluations for every gradient component.
-            parent_corner_gradients = np.asarray([
+            # Each trilinear derivative is bilinear in the other two
+            # coordinates and independent of the coordinate differentiated.
+            # Its extrema over this subcell therefore occur at combinations
+            # of the subcell endpoints on the other two axes. Reconstruct the
+            # gradient at this subcell's own eight corners, mapping each point
+            # back to parent-cell coordinates for the independent evaluator.
+            subcell_corner_gradients = np.asarray([
                 _coverage_audit_residual_gradient(
-                    residual, grid, cell, np.asarray(corner_frac, dtype=float)
+                    residual,
+                    grid,
+                    cell,
+                    (
+                        lo + np.asarray(corner_frac, dtype=float) * (hi - lo)
+                        - parent_lo
+                    ) / h,
                 )
                 for corner_frac in product((0.0, 1.0), repeat=3)
             ])
-            assert parent_corner_gradients.shape == (8, 3)
-            exact_corner_min = np.min(parent_corner_gradients, axis=0)
-            exact_corner_max = np.max(parent_corner_gradients, axis=0)
+            assert subcell_corner_gradients.shape == (8, 3)
+            exact_corner_min = np.min(subcell_corner_gradients, axis=0)
+            exact_corner_max = np.max(subcell_corner_gradients, axis=0)
             interval_tolerance = 2e-10 * max(
-                1.0, float(np.max(np.abs(parent_corner_gradients)))
+                1.0, float(np.max(np.abs(subcell_corner_gradients)))
             )
             assert np.all(
                 residual_intervals[:, 0] <= exact_corner_min + interval_tolerance
             ), (
-                f"residual lower interval misses parent-corner extrema: "
+                f"residual lower interval misses subcell-corner extrema: "
                 f"obstacles={obstacles}, cell={cell}, "
                 f"subcell={subcell['subcell_index']}, "
                 f"minimum={exact_corner_min.tolist()}, "
@@ -1013,7 +1020,7 @@ def test_reported_gradient_intervals_cover_dense_subcell_samples(
             assert np.all(
                 residual_intervals[:, 1] >= exact_corner_max - interval_tolerance
             ), (
-                f"residual upper interval misses parent-corner extrema: "
+                f"residual upper interval misses subcell-corner extrema: "
                 f"obstacles={obstacles}, cell={cell}, "
                 f"subcell={subcell['subcell_index']}, "
                 f"maximum={exact_corner_max.tolist()}, "

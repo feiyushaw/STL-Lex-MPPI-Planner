@@ -1935,6 +1935,15 @@ def make_paper_unicycle_problem(
         worst_subcell = min(
             subcell_reports, key=lambda report: float(report["total_lower"])
         )
+        separable_cell_lower_bound = min(
+            float(report["separable_total_lower"])
+            for report in subcell_reports
+        )
+        joint_cell_lower_bound = (
+            min(float(report["joint_total_lower"]) for report in subcell_reports)
+            if joint_extremum_enclosure else None
+        )
+        selected_cell_lower_bound = float(worst_subcell["total_lower"])
         if return_components:
             return {
                 "subdivisions_per_axis": (
@@ -1943,6 +1952,12 @@ def make_paper_unicycle_problem(
                     else list(subdivisions_per_axis)
                 ),
                 "subcell_count": len(subcell_reports),
+                "separable_cell_lower_bound": separable_cell_lower_bound,
+                "joint_cell_lower_bound": joint_cell_lower_bound,
+                "selected_cell_lower_bound": selected_cell_lower_bound,
+                "joint_cell_gain_over_separable": (
+                    selected_cell_lower_bound - separable_cell_lower_bound
+                ),
                 "worst_subcell_index": worst_subcell["subcell_index"],
                 "worst_subcell_bounds": worst_subcell["subcell_bounds"],
                 "position_cost_lower": worst_subcell["position_cost_lower"],

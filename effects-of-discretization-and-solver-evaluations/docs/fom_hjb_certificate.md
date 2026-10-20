@@ -193,6 +193,16 @@ refinement. The runner records diagnostic time separately from certificate
 build time so higher deep subdivision shapes do not silently inflate the
 reported build-time metric.
 
+An experimental centered joint HJB enclosure is available behind
+`--certificate-joint-extremum-enclosure`. It combines the signed x/y transport
+and minimized control contributions at one common subcell anchor, then subtracts
+conservative interval-deviation radii. The selected subcell lower bound is the
+maximum of this candidate and the established separable interval bound, so
+enabling the option cannot weaken the existing certificate. The option remains
+off by default pending the Ubuntu quality/runtime comparison. See
+[`joint_hjb_extremum_enclosure.md`](joint_hjb_extremum_enclosure.md) for the
+derivation, limitations, and validation matrix.
+
 ## Batched certificate queries
 
 `value_batch`, `corrected_lower_bound_batch`, and `prefix_bound_batch` are

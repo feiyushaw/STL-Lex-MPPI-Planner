@@ -119,3 +119,18 @@ User-reported controlled Ubuntu container comparison:
 Interpretation: the fallback invariant worked, but this centered-radius candidate did not improve global epsilon or pruning on the tested configuration and added modest certificate-build cost. Keep it opt-in.
 
 The 729-point dense Hamiltonian sample test is a numerical sanity check, not a proof over the continuous subcell. Conservativeness depends on the interval enclosure derivation and on the component/trigonometric bounds covering every point in each subcell. A subsequent method should target the avoidable heading-angle dependency directly, for example by analytically minimizing the transport term over the heading interval while preserving the common angle in cos(phi) and sin(phi).
+
+
+## Follow-up decomposition and four-way comparison (2026-10-20)
+
+The completed Ubuntu decomposition compared separable-only, centered-joint-only, analytic-heading-only, and joint-plus-heading configurations using matched test inputs and budgets.
+
+For the tested subcells, the decomposition identified:
+
+- **Control contribution:** `Delta_C = 0` to the reported precision. The center-value improvement was cancelled by the control Lipschitz radius `R_C`.
+- **Transport contribution:** `Delta_T < 0`. The centered transport radius `R_T` was sufficiently conservative at the finite tested cell sizes that the joint transport lower bound was weaker than the separable transport contribution.
+- **Combined candidate:** `Delta_L = Delta_T + Delta_C < 0` for the measured subcells. Thus the centered joint candidate was dominated by the separable candidate in this experiment.
+
+The analytic-heading-only configuration was the best of the four: reported coarse error decreased by about 35%, the refinement budget retained about 25% headroom, global epsilon reached approximately 10.14, and the previous bottleneck [4, 11, 3] was resolved. Enabling both joint and analytic heading produced no additional measurable gain over analytic heading alone.
+
+**Decision:** keep the centered joint option disabled and do not spend additional refinement budget trying to rescue this formulation without a new derivation. Use analytic-heading-only as the reference configuration for subsequent experiments on the tested constant-speed unicycle benchmark, subject to the separate gradient-interval audit. These findings are empirical for the tested grid/seed/budget configurations; they do not prove that the joint candidate is always dominated for every possible problem.

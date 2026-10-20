@@ -1,4 +1,5 @@
 from dataclasses import replace
+from itertools import product
 
 import numpy as np
 import pytest
@@ -8,6 +9,7 @@ from utils.fom_certificate import (
     SemiLagrangianFOMCertificate,
     make_paper_unicycle_problem,
     radial_terminal_cost,
+    _heading_transport_interval_lower_bound,
 )
 
 
@@ -17,6 +19,8 @@ def make_small_certificate(
     refinement_budget=256,
     deep_refinement_budget=8,
     deep_refinement_subdivisions=(4, 4, 2),
+    joint_extremum_enclosure=False,
+    heading_extremum_enclosure=False,
 ):
     problem = make_paper_unicycle_problem(
         goal=(0.0, 0.0),
@@ -30,6 +34,8 @@ def make_small_certificate(
         obstacles=obstacles,
         n_controls=9,
         deep_refinement_subdivisions=deep_refinement_subdivisions,
+        joint_extremum_enclosure=joint_extremum_enclosure,
+        heading_extremum_enclosure=heading_extremum_enclosure,
     )
     grid = RegularGrid(
         lower=np.array([-2.0, -2.0, -np.pi]),
@@ -45,6 +51,166 @@ def make_small_certificate(
         deep_refinement_budget=deep_refinement_budget,
     )
     return cert
+
+
+def test_joint_extremum_enclosure_is_opt_in_and_never_weakens_bounds():
+    separable = make_small_certificate(iterations=2)
+    joint = make_small_certificate(
+        iterations=2, joint_extremum_enclosure=True
+    )
+    separable_report = separable.build()
+    joint_report = joint.build()
+
+    assert joint_report.epsilon <= separable_report.epsilon + 1e-10
+    assert joint_report.epsilon_terminal == separable_report.epsilon_terminal
+    cell = (6, 4, 2)
+    separable_diag = separable.problem.cell_slack_diagnostics(
+        separable.values[-1], separable.grid, cell
+    )["deep"]
+    joint_diag = joint.problem.cell_slack_diagnostics(
+        joint.values[-1], joint.grid, cell
+    )["deep"]
+
+    assert not separable_diag["joint_extremum_enclosure_enabled"]
+    assert joint_diag["joint_extremum_enclosure_enabled"]
+    assert (
+        joint_diag["total_lower"]
+        >= joint_diag["separable_total_lower"] - 1e-10
+    )
+    assert joint_diag["joint_total_lower"] is not None
+    assert joint_diag["joint_cell_lower_bound"] is not None
+    assert (
+        joint_diag["selected_cell_lower_bound"]
+        >= joint_diag["separable_cell_lower_bound"] - 1e-10
+    )
+    assert joint_diag["joint_cell_gain_over_separable"] >= -1e-10
+    assert joint_diag["selected_bound_method"] in {"joint", "separable"}
+
+
+def test_joint_extremum_enclosure_is_below_dense_hamiltonian_samples():
+    cert = make_small_certificate(
+        iterations=2,
+        joint_extremum_enclosure=True,
+        heading_extremum_enclosure=True,
+    )
+    cert.build()
+    grid = cert.grid
+    cell = (6, 4, 2)
+    values = cert.values[-1].reshape(grid.shape)
+    radial = cert.problem.terminal_cost(grid.nodes).reshape(grid.shape)
+    residual = values - radial
+    h = grid.spacing
+    lower = cert.problem.cell_slack_lower_bound(
+        cert.values[-1], grid, cell
+    )
+
+    def residual_gradient(frac):
+        result = []
+        for axis in range(3):
+            other_axes = [a for a in range(3) if a != axis]
+            derivative = 0.0
+            for other_bits in product((0, 1), repeat=2):
+                idx0 = list(cell)
+                idx1 = list(cell)
+                weight = 1.0
+                for j, other_axis in enumerate(other_axes):
+                    bit = other_bits[j]
+                    idx0[other_axis] += bit
+                    idx1[other_axis] += bit
+                    t = frac[other_axis]
+                    weight *= t if bit else 1.0 - t
+                idx0[axis] = cell[axis]
+                idx1[axis] = cell[axis] + 1
+                derivative += weight * (
+                    residual[tuple(idx1)] - residual[tuple(idx0)]
+                )
+            result.append(float(derivative / h[axis]))
+        return np.asarray(result)
+
+    sampled_slack = []
+    for frac_tuple in product(np.linspace(0.0, 1.0, 9), repeat=3):
+        frac = np.asarray(frac_tuple, dtype=float)
+        state = grid.lower + (np.asarray(cell, dtype=float) + frac) * h
+        gx, gy, gp = residual_gradient(frac)
+        dx, dy = float(state[0]), float(state[1])
+        distance = float(np.hypot(dx, dy))
+        if distance > 0.5:
+            gx += distance * dx
+            gy += distance * dy
+        u = float(np.clip(-gp / 0.2, -1.0, 1.0))
+        slack = (
+            dx * dx + dy * dy
+            + gx * np.cos(state[2]) + gy * np.sin(state[2])
+            + 0.1 * u * u + gp * u
+        )
+        sampled_slack.append(float(slack))
+
+    assert lower <= min(sampled_slack) + 1e-9
+
+
+@pytest.mark.parametrize(
+    "gx0,gx1,gy0,gy1,phi_lo,phi_hi",
+    [
+        (-2.0, 1.0, -0.5, 2.5, -1.4, 1.7),
+        (-1.0, 2.0, -2.0, 0.2, 0.2, 1.2),
+        (-0.5, 1.5, -1.5, 0.8, -2.4, -0.3),
+        (-3.0, -1.0, 0.5, 2.0, 1.1, 2.1),
+        (0.2, 0.8, -1.1, 0.4, 0.3, 0.3),
+    ],
+)
+def test_analytic_heading_transport_enclosure_is_below_dense_box_samples(
+    gx0, gx1, gy0, gy1, phi_lo, phi_hi
+):
+    speed = 1.7
+    lower = _heading_transport_interval_lower_bound(
+        gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=speed
+    )
+    sampled = []
+    for phi in np.linspace(phi_lo, phi_hi, 20001):
+        c = float(np.cos(phi))
+        s = float(np.sin(phi))
+        gx_term = min(gx0 * c, gx1 * c)
+        gy_term = min(gy0 * s, gy1 * s)
+        sampled.append(speed * (gx_term + gy_term))
+    assert lower <= min(sampled) + 1e-9
+
+
+def test_heading_extremum_enclosure_is_opt_in_and_dominates_separable_bound():
+    separable = make_small_certificate(iterations=2)
+    heading = make_small_certificate(
+        iterations=2, heading_extremum_enclosure=True
+    )
+    separable_report = separable.build()
+    heading_report = heading.build()
+
+    assert heading_report.epsilon <= separable_report.epsilon + 1e-10
+    assert heading_report.epsilon_terminal == separable_report.epsilon_terminal
+    cell = (6, 4, 2)
+    diag = heading.problem.cell_slack_diagnostics(
+        heading.values[-1], heading.grid, cell
+    )["deep"]
+
+    assert not separable.problem.cell_slack_diagnostics(
+        separable.values[-1], separable.grid, cell
+    )["deep"]["heading_extremum_enclosure_enabled"]
+    assert diag["heading_extremum_enclosure_enabled"]
+    assert diag["heading_transport_lower"] is not None
+    assert diag["heading_total_lower"] is not None
+    assert (
+        diag["heading_transport_lower"]
+        >= diag["x_transport_lower"] + diag["y_transport_lower"] - 1e-9
+    )
+    assert diag["heading_cell_lower_bound"] is not None
+    assert (
+        diag["heading_cell_lower_bound"]
+        >= diag["separable_cell_lower_bound"] - 1e-9
+    )
+    assert diag["selected_cell_lower_bound"] >= (
+        diag["separable_cell_lower_bound"] - 1e-9
+    )
+    assert diag["selected_bound_method"] in {
+        "separable", "joint", "heading_extremum"
+    }
 
 
 def test_radial_warm_start_matches_closed_form():

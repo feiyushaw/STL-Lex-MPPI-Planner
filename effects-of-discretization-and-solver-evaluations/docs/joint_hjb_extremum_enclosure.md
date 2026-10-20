@@ -94,7 +94,11 @@ For K=50 and K=300, compare:
 
 1. `epsilon` and the final per-cell maximum-violation consistency gate.
 2. The worst refined, unrefined, and deep-refined cells and their violations.
-3. Per-cell `separable_total_lower`, `joint_total_lower`, and `selected_bound_method` in the neighborhood diagnostics.
+3. In `slack_components.deep`, compare `separable_cell_lower_bound`,
+   `joint_cell_lower_bound`, `selected_cell_lower_bound`, and
+   `joint_cell_gain_over_separable`; inspect per-subcell
+   `separable_total_lower`, `joint_total_lower`, and
+   `selected_bound_method` to see where the joint candidate is active.
 4. Certificate-build time, separate diagnostic time, IGO time, and pruning counts.
 5. Terminal error, Bellman monotonicity, discrete-subsolution status, and independent rollout-cost agreement.
 

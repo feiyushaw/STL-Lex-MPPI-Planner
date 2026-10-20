@@ -75,6 +75,12 @@ def test_joint_extremum_enclosure_is_opt_in_and_never_weakens_bounds():
         >= joint_diag["separable_total_lower"] - 1e-10
     )
     assert joint_diag["joint_total_lower"] is not None
+    assert joint_diag["joint_cell_lower_bound"] is not None
+    assert (
+        joint_diag["selected_cell_lower_bound"]
+        >= joint_diag["separable_cell_lower_bound"] - 1e-10
+    )
+    assert joint_diag["joint_cell_gain_over_separable"] >= -1e-10
     assert joint_diag["selected_bound_method"] in {"joint", "separable"}
 
 

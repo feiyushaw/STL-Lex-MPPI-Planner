@@ -103,3 +103,19 @@ For K=50 and K=300, compare:
 5. Terminal error, Bellman monotonicity, discrete-subsolution status, and independent rollout-cost agreement.
 
 The expected structural invariant is that enabling the joint candidate cannot increase any cell's violation or global epsilon, because the selected lower bound is the maximum of two conservative lower bounds. A lower epsilon is useful only if all independent certificate and rollout-cost gates still pass. Dense sample checks are sanity tests, not a substitute for the enclosure argument above.
+
+
+## 6. Ubuntu validation results for commit be4dff4
+
+User-reported controlled Ubuntu container comparison:
+
+- Focused suite: **40 passed in 4.64 s**.
+- K=50: epsilon stayed at 10.3109; pruning stayed at 155; completed rollouts stayed at 9,845.
+- K=300: epsilon stayed at 10.5071; pruning stayed at 131; completed rollouts stayed at 9,869.
+- IGO solve time stayed around 0.315 s.
+- Certificate build time increased from 1.85 s to 2.10 s at K=50 and from 6.28 s to 6.54 s at K=300.
+- The selected bound remained the separable candidate at the reported worst cells. The joint candidate was weaker there: for example, at the deep cell [10, 4, 6], the reported separable/joint values were -9.1337/-9.3157; at [4, 11, 3], they were -10.5071/-10.6241.
+
+Interpretation: the fallback invariant worked, but this centered-radius candidate did not improve global epsilon or pruning on the tested configuration and added modest certificate-build cost. Keep it opt-in.
+
+The 729-point dense Hamiltonian sample test is a numerical sanity check, not a proof over the continuous subcell. Conservativeness depends on the interval enclosure derivation and on the component/trigonometric bounds covering every point in each subcell. A subsequent method should target the avoidable heading-angle dependency directly, for example by analytically minimizing the transport term over the heading interval while preserving the common angle in cos(phi) and sin(phi).

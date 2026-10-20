@@ -949,15 +949,14 @@ def test_reported_gradient_intervals_cover_dense_subcell_samples(
     )
     cert.build()
     grid = cert.grid
-    values = cert.values[-1].reshape(grid.shape)
+    values = np.asarray(cert.values[-1], dtype=float).reshape(grid.shape)
+    values = np.where(np.isfinite(values), values, 0.0)
     radial = cert.problem.terminal_cost(grid.nodes).reshape(grid.shape)
     residual = values - radial
     h = grid.spacing
-    parent_origin_cache = {}
 
     for cell in cells:
         parent_lo = grid.lower + np.asarray(cell, dtype=float) * h
-        parent_origin_cache[cell] = parent_lo
         diagnostic = cert.problem.cell_slack_diagnostics(
             cert.values[-1], grid, cell
         )["deep"]

@@ -1464,6 +1464,7 @@ def make_paper_unicycle_problem(
     obstacles: Sequence[tuple[float, float, float, float]] = (),
     n_controls: int = 21,
     deep_refinement_subdivisions: Sequence[int] = (4, 4, 2),
+    joint_extremum_enclosure: bool = False,
 ) -> FOMCertificateProblem:
     """Construct the Section V-A constant-speed unicycle problem.
 
@@ -1498,6 +1499,8 @@ def make_paper_unicycle_problem(
             "deep_refinement_subdivisions must contain three positive integers"
         )
     deep_subdivisions = tuple(int(value) for value in raw_deep_subdivisions)
+    if not isinstance(joint_extremum_enclosure, bool):
+        raise ValueError("joint_extremum_enclosure must be a bool")
 
     controls = np.linspace(
         control_min, control_max, n_controls, dtype=float
@@ -1782,9 +1785,117 @@ def make_paper_unicycle_problem(
                     control_lower, r_control * uu * uu + gphi * uu
                 )
 
-            total_lower = float(
+            separable_total_lower = float(
                 position_cost_lower + x_transport_lower
                 + y_transport_lower + control_lower
+            )
+            joint_total_lower = separable_total_lower
+            joint_transport_center = None
+            joint_transport_radius = None
+            joint_control_center = None
+            joint_control_radius = None
+            if joint_extremum_enclosure:
+                # Centered joint enclosure. Unlike the separable interval
+                # bound above, this keeps the transport and control terms at
+                # one common anchor state, preserving their signed
+                # cancellation. The interval-radius terms below enclose all
+                # deviations from that anchor over the complete subcell.
+                center_frac = 0.5 * (frac_lo + frac_hi)
+                center_state = parent_lo + center_frac * h
+                center_derivatives = []
+                for axis in range(3):
+                    other_axes = [a for a in range(3) if a != axis]
+                    derivative = 0.0
+                    for endpoint_bits in product((0, 1), repeat=2):
+                        other_t = [
+                            center_frac[a]
+                            for a in other_axes
+                        ]
+                        weight = 1.0
+                        for t in other_t:
+                            weight *= t if endpoint_bits[other_t.index(t)] else 1.0 - t
+                        # The explicit corner sum below avoids relying on
+                        # endpoint-only extrema for the center gradient.
+                        del weight
+                    for corner_bits in product((0, 1), repeat=3):
+                        weight = 1.0
+                        for a, bit in enumerate(corner_bits):
+                            if a != axis:
+                                t = center_frac[a]
+                                weight *= t if bit else 1.0 - t
+                        idx0 = list(corner_bits)
+                        idx1 = list(corner_bits)
+                        idx0[axis] = 0
+                        idx1[axis] = 1
+                        derivative += weight * (
+                            corner_residual[tuple(idx1)]
+                            - corner_residual[tuple(idx0)]
+                        )
+                    center_derivatives.append(float(derivative / h[axis]))
+
+                center_dx = float(center_state[0] - goal[0])
+                center_dy = float(center_state[1] - goal[1])
+                center_distance = float(np.hypot(center_dx, center_dy))
+                if center_distance > goal_radius:
+                    radial_gx_center = radial_scale * center_distance * center_dx
+                    radial_gy_center = radial_scale * center_distance * center_dy
+                else:
+                    radial_gx_center = 0.0
+                    radial_gy_center = 0.0
+                gx_center = center_derivatives[0] + radial_gx_center
+                gy_center = center_derivatives[1] + radial_gy_center
+                gp_center = center_derivatives[2]
+                cos_center = float(np.cos(center_state[2]))
+                sin_center = float(np.sin(center_state[2]))
+
+                gx_radius = max(abs(gx0 - gx_center), abs(gx1 - gx_center))
+                gy_radius = max(abs(gy0 - gy_center), abs(gy1 - gy_center))
+                gp_radius = max(abs(gp0 - gp_center), abs(gp1 - gp_center))
+                cos_radius = max(abs(cos0 - cos_center), abs(cos1 - cos_center))
+                sin_radius = max(abs(sin0 - sin_center), abs(sin1 - sin_center))
+                cos_abs = max(abs(cos0), abs(cos1))
+                sin_abs = max(abs(sin0), abs(sin1))
+
+                joint_transport_center = float(
+                    forward_speed * (
+                        gx_center * cos_center + gy_center * sin_center
+                    )
+                )
+                joint_transport_radius = float(
+                    forward_speed * (
+                        gx_radius * cos_abs
+                        + abs(gx_center) * cos_radius
+                        + gy_radius * sin_abs
+                        + abs(gy_center) * sin_radius
+                    )
+                )
+                u_center = float(np.clip(
+                    -gp_center / (2.0 * r_control),
+                    control_min,
+                    control_max,
+                ))
+                joint_control_center = float(
+                    r_control * u_center * u_center + gp_center * u_center
+                )
+                max_abs_control = max(abs(control_min), abs(control_max))
+                joint_control_radius = float(max_abs_control * gp_radius)
+                joint_total_lower = float(
+                    position_cost_lower
+                    + joint_transport_center
+                    + joint_control_center
+                    - joint_transport_radius
+                    - joint_control_radius
+                )
+
+            # Both candidates are independently conservative lower bounds.
+            # Their maximum remains conservative and can never weaken the
+            # established separable enclosure.
+            total_lower = max(separable_total_lower, joint_total_lower)
+            selected_bound_method = (
+                "joint"
+                if joint_extremum_enclosure
+                and joint_total_lower > separable_total_lower
+                else "separable"
             )
             subcell_reports.append(
                 {
@@ -1798,6 +1909,16 @@ def make_paper_unicycle_problem(
                     "y_transport_lower": float(y_transport_lower),
                     "position_transport_lower": float(position_transport_lower),
                     "control_lower": float(control_lower),
+                    "separable_total_lower": separable_total_lower,
+                    "joint_extremum_enclosure_enabled": joint_extremum_enclosure,
+                    "joint_total_lower": (
+                        float(joint_total_lower) if joint_extremum_enclosure else None
+                    ),
+                    "joint_transport_center": joint_transport_center,
+                    "joint_transport_radius": joint_transport_radius,
+                    "joint_control_center": joint_control_center,
+                    "joint_control_radius": joint_control_radius,
+                    "selected_bound_method": selected_bound_method,
                     "total_lower": total_lower,
                     "residual_gradient_intervals": [
                         [float(lo), float(hi)]
@@ -1838,6 +1959,16 @@ def make_paper_unicycle_problem(
                 "y_transport_lower": worst_subcell["y_transport_lower"],
                 "position_transport_lower": worst_subcell["position_transport_lower"],
                 "control_lower": worst_subcell["control_lower"],
+                "separable_total_lower": worst_subcell["separable_total_lower"],
+                "joint_extremum_enclosure_enabled": (
+                    worst_subcell["joint_extremum_enclosure_enabled"]
+                ),
+                "joint_total_lower": worst_subcell["joint_total_lower"],
+                "joint_transport_center": worst_subcell["joint_transport_center"],
+                "joint_transport_radius": worst_subcell["joint_transport_radius"],
+                "joint_control_center": worst_subcell["joint_control_center"],
+                "joint_control_radius": worst_subcell["joint_control_radius"],
+                "selected_bound_method": worst_subcell["selected_bound_method"],
                 "total_lower": worst_subcell["total_lower"],
                 "residual_gradient_intervals": worst_subcell["residual_gradient_intervals"],
                 "radial_gradient_intervals": worst_subcell["radial_gradient_intervals"],

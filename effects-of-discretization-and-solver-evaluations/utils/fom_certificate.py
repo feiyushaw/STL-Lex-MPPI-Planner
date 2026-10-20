@@ -1,0 +1,1941 @@
+"""FOM/HJB certificates built by independent semi-Lagrangian value iteration.
+
+This module implements the certificate side of the FOM construction described in
+arXiv:2603.16231v3, Section III-B and Section V-B.
+
+The certificate is deliberately independent of IGO rollouts. A finite grid
+stores a stationary HJB subsolution candidate. Semi-Lagrangian Bellman sweeps
+tighten the candidate from below. The resulting interpolation is accompanied
+by conservative terminal and running-slack tolerances, so callers can use the
+corrected lower bound
+
+    v(x) - epsilon * remaining_time - epsilon_T.
+
+The paper's benchmark-specific radial warm start and constant-speed unicycle
+are implemented as a concrete problem below. A generic grid engine is also
+provided so the same certificate machinery can later be connected to a planner
+with a different state/control model.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from itertools import product
+from typing import Callable, Optional, Sequence
+
+import numpy as np
+from scipy.ndimage import distance_transform_edt
+
+
+Array = np.ndarray
+
+
+@dataclass(frozen=True)
+class RegularGrid:
+    """Tensor-product grid with optional periodic axes."""
+
+    lower: Array
+    upper: Array
+    shape: tuple[int, ...]
+    periodic_axes: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        lower = np.asarray(self.lower, dtype=float)
+        upper = np.asarray(self.upper, dtype=float)
+        if lower.ndim != 1 or upper.shape != lower.shape:
+            raise ValueError("grid bounds must be one-dimensional and equal-sized")
+        if len(self.shape) != lower.size or any(int(n) < 2 for n in self.shape):
+            raise ValueError("every grid axis needs at least two nodes")
+        if np.any(upper <= lower):
+            raise ValueError("grid upper bounds must exceed lower bounds")
+        if any(a < 0 or a >= lower.size for a in self.periodic_axes):
+            raise ValueError("periodic axis index is outside the state dimension")
+        object.__setattr__(self, "lower", lower)
+        object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "shape", tuple(int(n) for n in self.shape))
+        object.__setattr__(self, "periodic_axes", tuple(self.periodic_axes))
+
+    @property
+    def spacing(self) -> Array:
+        result = (self.upper - self.lower).copy()
+        for axis in range(len(self.shape)):
+            if axis in self.periodic_axes:
+                result[axis] /= self.shape[axis]
+            else:
+                result[axis] /= self.shape[axis] - 1
+        return result
+
+    @property
+    def nodes(self) -> Array:
+        axes = []
+        for axis, n in enumerate(self.shape):
+            axes.append(
+                np.linspace(
+                    self.lower[axis],
+                    self.upper[axis],
+                    n,
+                    endpoint=axis not in self.periodic_axes,
+                )
+            )
+        return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(
+            -1, len(self.shape)
+        )
+
+    @property
+    def cell_diameter(self) -> float:
+        return float(np.linalg.norm(self.spacing))
+
+
+@dataclass(frozen=True)
+class FOMCertificateProblem:
+    """Continuous Bolza data used by the HJB certificate."""
+
+    dynamics: Callable[[Array, Array], Array]
+    running_cost: Callable[[Array, Array], Array]
+    terminal_cost: Callable[[Array], Array]
+    admissible: Callable[[Array], Array]
+    terminal_set: Callable[[Array], Array]
+    controls: Array
+    dt: float
+    initial_lower_bound: Optional[Callable[[Array], Array]] = None
+    initial_lower_bound_is_subsolution: bool = False
+    global_value_lower_bound: float = 0.0
+    running_cost_lower_bound: float = 0.0
+    terminal_cost_lipschitz: Optional[float] = None
+    terminal_cell_intersects: Optional[Callable[[Array, Array], bool]] = None
+    terminal_cell_lower_bound: Optional[Callable[[Array, Array], float]] = None
+    cell_is_fully_inadmissible: Optional[Callable[[Array, Array], bool]] = None
+    outside_domain_lower_bound: Optional[Callable[[Array], Array]] = None
+    outside_domain_is_subsolution: bool = False
+    control_lipschitz_bound: Optional[Callable[[Array, "RegularGrid"], float]] = None
+    cell_slack_lower_bound: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], float]
+    ] = None
+    # Optional tighter lower bound obtained by subdividing a grid cell.
+    # Both callbacks must return conservative lower bounds on the same cell.
+    cell_slack_lower_bound_refined: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], float]
+    ] = None
+    # Optional second-level subdivision callback for the highest-impact
+    # already-refined cells. It must remain a conservative bound on the same
+    # parent-cell infimum.
+    cell_slack_lower_bound_deep: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], float]
+    ] = None
+    # Diagnostic decomposition for the selected worst cell; does not affect
+    # the certificate gate or any bound used for pruning.
+    cell_slack_diagnostics: Optional[
+        Callable[[Array, "RegularGrid", tuple[int, ...]], dict[str, object]]
+    ] = None
+
+
+@dataclass(frozen=True)
+class CertificateReport:
+    iterations: int
+    epsilon: float
+    epsilon_terminal: float
+    initial_value: float
+    grid_nodes: int
+    admissible_nodes: int
+    bellman_monotone: bool
+    discrete_subsolution: bool
+    epsilon_worst_cell: Optional[tuple[int, ...]] = None
+
+
+class SemiLagrangianFOMCertificate:
+    """Static-grid semi-Lagrangian HJB certificate.
+
+    The Bellman operator is
+        T V(x) = inf_u { dt * ell(x,u) + V(x + dt f(x,u)) }.
+
+    State constraints are fail-closed. Transitions into inadmissible states
+    are excluded. Without a certified extension, outside-grid queries use the
+    declared global value lower bound and cells with unavailable corners fail
+    closed. The paper benchmark supplies a global radial lower-bound
+    subsolution; the interpolant is represented as this baseline plus a
+    multilinear residual, so the extension remains continuous at the boundary.
+    """
+
+    def __init__(
+        self,
+        problem: FOMCertificateProblem,
+        grid: RegularGrid,
+        *,
+        iterations: int = 0,
+        monotone_start: bool = True,
+        refinement_budget: int = 256,
+        deep_refinement_budget: int = 8,
+    ) -> None:
+        if problem.dt <= 0.0:
+            raise ValueError("certificate dt must be positive")
+        controls = np.asarray(problem.controls, dtype=float)
+        if controls.ndim < 1 or controls.shape[0] == 0:
+            raise ValueError("certificate requires at least one control sample")
+        self.problem = problem
+        self.grid = grid
+        self.nodes = grid.nodes
+        self.iterations = int(iterations)
+        if self.iterations < 0:
+            raise ValueError("iterations must be non-negative")
+        self.refinement_budget = int(refinement_budget)
+        if self.refinement_budget < 0:
+            raise ValueError("refinement_budget must be non-negative")
+        self.deep_refinement_budget = int(deep_refinement_budget)
+        if self.deep_refinement_budget < 0:
+            raise ValueError("deep_refinement_budget must be non-negative")
+        if not np.isfinite(problem.global_value_lower_bound):
+            raise ValueError("global_value_lower_bound must be finite")
+        if not np.isfinite(problem.running_cost_lower_bound):
+            raise ValueError("running_cost_lower_bound must be finite")
+        if problem.terminal_cost_lipschitz is not None and (
+            not np.isfinite(problem.terminal_cost_lipschitz)
+            or problem.terminal_cost_lipschitz < 0.0
+        ):
+            raise ValueError("terminal_cost_lipschitz must be finite and non-negative")
+
+        if problem.outside_domain_lower_bound is not None:
+            if not problem.outside_domain_is_subsolution:
+                raise ValueError(
+                    "outside_domain_lower_bound requires an explicit "
+                    "outside_domain_is_subsolution declaration"
+                )
+            if problem.outside_domain_lower_bound is not problem.terminal_cost:
+                raise ValueError(
+                    "the current continuous extension requires the outside "
+                    "lower bound to be the exact terminal_cost callable"
+                )
+
+        self._domain_baseline_nodes = (
+            self._evaluate_outside_domain_lower_bound(self.nodes)
+            if problem.outside_domain_lower_bound is not None
+            else None
+        )
+        self._node_admissible = np.asarray(
+            problem.admissible(self.nodes), dtype=bool
+        ).reshape(self.grid.shape)
+        # The admissibility mask is fixed over value iteration. Cache nearest
+        # admissible indices once; recomputing a distance transform inside
+        # every interpolation query would erase the batching speedup.
+        self._nearest_admissible_indices = (
+            self._build_nearest_admissible_indices()
+            if self._domain_baseline_nodes is not None
+            else None
+        )
+        self._obstacle_halo_mask = self._make_obstacle_halo_mask()
+        self._boundary_extension_weights = self._make_boundary_extension_weights()
+        boundary_surface = self._boundary_extension_weights == 0.0
+        if problem.outside_domain_lower_bound is not None and np.any(
+            self._obstacle_halo_mask & boundary_surface
+        ):
+            raise ValueError(
+                "blocked-state halo intersects the outer grid boundary; "
+                "expand the grid before using the radial extension"
+            )
+
+        initial_fn = (
+            problem.initial_lower_bound
+            if problem.initial_lower_bound is not None
+            else problem.terminal_cost
+        )
+        initial = np.asarray(initial_fn(self.nodes), dtype=float).reshape(-1)
+        if initial.size != self.nodes.shape[0] or not np.all(np.isfinite(initial)):
+            raise ValueError("initial certificate must be finite at every grid node")
+        initial = initial.copy()
+        initial[~self._node_admissible.reshape(-1)] = np.inf
+        if self.iterations > 0:
+            initial = self._apply_safe_domain(initial)
+
+        self.values: list[Array] = [initial]
+        self._monotone_start = bool(monotone_start)
+        self._built = False
+        self._epsilon = 0.0
+        self._epsilon_terminal = 0.0
+        self._epsilon_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_coarse = 0.0
+        self._epsilon_refined_cells = 0
+        self._epsilon_coarse_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_coarse_cell_lowers: dict[tuple[int, ...], float] = {}
+        self._epsilon_final_cell_lowers: dict[tuple[int, ...], float] = {}
+        self._epsilon_refined_cell_set: set[tuple[int, ...]] = set()
+        self._epsilon_deep_refined_cell_set: set[tuple[int, ...]] = set()
+        self._epsilon_refined_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_refined_worst_violation = 0.0
+        self._epsilon_deep_refined_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_deep_refined_worst_violation = 0.0
+        self._epsilon_unrefined_worst_cell: Optional[tuple[int, ...]] = None
+        self._epsilon_unrefined_worst_violation = 0.0
+        self._epsilon_refinement_budget = self.refinement_budget
+        self._epsilon_deep_refinement_budget = self.deep_refinement_budget
+        self._epsilon_refinement_budget_exhausted = False
+        self._epsilon_deep_refinement_budget_exhausted = False
+        self._bellman_monotone = True
+        self._discrete_subsolution = False
+
+    def _make_obstacle_halo_mask(self) -> Array:
+        """Mark admissible nodes adjacent to blocked/unknown states.
+
+        Without a certified outside-domain extension, this halo is pinned to
+        the global lower bound to make interpolation fail closed. With the
+        radial extension, the mask is diagnostic only: pinning halo nodes to
+        zero would create an artificial residual jump against the radial
+        baseline and amplify the continuous HJB slack near obstacles.
+        """
+        shape = self.grid.shape
+        dim = len(shape)
+        invalid = ~self._node_admissible
+        halo = np.zeros(shape, dtype=bool)
+
+        for index in np.ndindex(shape):
+            if not invalid[index]:
+                continue
+            for offsets in product((-1, 0, 1), repeat=dim):
+                neighbor = []
+                inside = True
+                for axis, offset in enumerate(offsets):
+                    j = index[axis] + offset
+                    if axis in self.grid.periodic_axes:
+                        j %= shape[axis]
+                    elif j < 0 or j >= shape[axis]:
+                        inside = False
+                        break
+                    neighbor.append(j)
+                if inside:
+                    halo[tuple(neighbor)] = True
+
+        if self.problem.outside_domain_lower_bound is None:
+            for axis in range(dim):
+                if axis in self.grid.periodic_axes:
+                    continue
+                boundary = [slice(None)] * dim
+                boundary[axis] = 0
+                halo[tuple(boundary)] = True
+                boundary[axis] = -1
+                halo[tuple(boundary)] = True
+
+        return halo & self._node_admissible
+
+    def _make_boundary_extension_weights(self) -> Array:
+        """Smoothly taper Bellman updates to the certified boundary extension.
+
+        The weight is zero on the outer boundary and reaches one four grid
+        layers inward. A cubic smoothstep avoids a one-cell jump in the
+        residual while keeping the entire interpolation domain certified.
+        """
+        shape = self.grid.shape
+        if self.problem.outside_domain_lower_bound is None:
+            return np.ones(shape, dtype=float)
+
+        distance = np.full(shape, np.inf, dtype=float)
+        for axis, size in enumerate(shape):
+            if axis in self.grid.periodic_axes:
+                continue
+            axis_index = np.arange(size, dtype=float)
+            axis_distance = np.minimum(axis_index, size - 1 - axis_index)
+            reshape = [1] * len(shape)
+            reshape[axis] = size
+            distance = np.minimum(distance, axis_distance.reshape(reshape))
+
+        t = np.clip(distance / 4.0, 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    def _evaluate_outside_domain_lower_bound(self, points: Array) -> Array:
+        points = np.asarray(points, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        if self.problem.outside_domain_lower_bound is None:
+            return np.full(
+                points.shape[0], self.problem.global_value_lower_bound, dtype=float
+            )
+        values = np.asarray(
+            self.problem.outside_domain_lower_bound(points), dtype=float
+        ).reshape(-1)
+        if values.size != points.shape[0] or not np.all(np.isfinite(values)):
+            raise ValueError(
+                "outside_domain_lower_bound must return one finite value per point"
+            )
+        return values
+
+    def _apply_safe_domain(self, values: Array) -> Array:
+        result = np.asarray(values, dtype=float).reshape(-1).copy()
+        if self._domain_baseline_nodes is not None:
+            baseline = self._domain_baseline_nodes
+            weights = self._boundary_extension_weights.reshape(-1)
+            admissible = self._node_admissible.reshape(-1)
+            # If a feasible node has no usable Bellman successor, retain the
+            # declared global subsolution rather than introducing a new
+            # non-finite corner into the continuous extension.
+            unavailable = admissible & ~np.isfinite(result)
+            result[unavailable] = baseline[unavailable]
+            finite_admissible = admissible & np.isfinite(result)
+            tapered = finite_admissible & (weights < 1.0)
+            result[tapered] = baseline[tapered] + weights[tapered] * (
+                result[tapered] - baseline[tapered]
+            )
+        # Without a certified continuous extension, pin the admissible
+        # obstacle halo to the global lower bound so interpolation fails
+        # closed around unavailable corners. With the radial extension, do
+        # not overwrite halo nodes after tapering: forcing them to zero while
+        # anchoring the outer boundary to the radial baseline creates a large
+        # artificial residual jump in cells where the obstacle halo overlaps
+        # the boundary taper. Blocked corners are already replaced by the
+        # global lower bound in the residual interpolant, and the complete
+        # halo-adjacent cell remains covered by the slack gate.
+        if self._domain_baseline_nodes is None:
+            result[self._obstacle_halo_mask.reshape(-1)] = (
+                self.problem.global_value_lower_bound
+            )
+        result[~self._node_admissible.reshape(-1)] = np.inf
+        return result
+
+    def _cell_corner_indices(self, cell: tuple[int, ...]):
+        for bits in product((0, 1), repeat=len(self.grid.shape)):
+            idx = []
+            for axis, bit in enumerate(bits):
+                j = cell[axis] + bit
+                if axis in self.grid.periodic_axes:
+                    j %= self.grid.shape[axis]
+                idx.append(j)
+            yield tuple(idx)
+
+    def _cell_corner_values(self, values: Array, cell: tuple[int, ...]) -> Array:
+        shaped = np.asarray(values, dtype=float).reshape(self.grid.shape)
+        return np.asarray(
+            [shaped[idx] for idx in self._cell_corner_indices(cell)],
+            dtype=float,
+        )
+
+    def _cell_corner_points(self, cell: tuple[int, ...]) -> Array:
+        h = self.grid.spacing
+        return np.asarray(
+            [
+                [
+                    self.grid.lower[axis] + (cell[axis] + bit) * h[axis]
+                    for axis, bit in enumerate(bits)
+                ]
+                for bits in product((0, 1), repeat=len(self.grid.shape))
+            ],
+            dtype=float,
+        )
+
+    def _cell_bounds(self, cell: tuple[int, ...]) -> tuple[Array, Array]:
+        lo = self.grid.lower + np.asarray(cell, dtype=float) * self.grid.spacing
+        return lo, lo + self.grid.spacing
+
+    def _build_nearest_admissible_indices(self):
+        """Precompute nearest admissible grid nodes, respecting periodic axes."""
+        valid = self._node_admissible
+        if not np.any(valid):
+            return None
+        if np.all(valid):
+            return tuple(np.indices(self.grid.shape, dtype=int))
+
+        tiled_valid = valid
+        for axis in sorted(self.grid.periodic_axes):
+            tiled_valid = np.concatenate(
+                (tiled_valid, tiled_valid, tiled_valid), axis=axis
+            )
+        _, nearest_indices = distance_transform_edt(
+            ~tiled_valid,
+            sampling=self.grid.spacing,
+            return_indices=True,
+        )
+        center = tuple(
+            slice(size, 2 * size)
+            if axis in self.grid.periodic_axes
+            else slice(None)
+            for axis, size in enumerate(self.grid.shape)
+        )
+        nearest = []
+        for axis, size in enumerate(self.grid.shape):
+            index = nearest_indices[(axis, *center)]
+            if axis in self.grid.periodic_axes:
+                index = index % size
+            nearest.append(index)
+        return tuple(nearest)
+
+    def _effective_extension_values(self, values: Array) -> Array:
+        """Extend the radial residual through blocked nodes for interpolation.
+
+        The certificate is queried only on admissible states. Assigning the
+        global lower bound to every blocked corner creates an artificial jump
+        from the radial baseline at obstacle boundaries. Instead, extend the
+        residual V - v_rad from the nearest admissible node. Nearest-node
+        indices are precomputed once per certificate and respect periodic
+        wraparound.
+
+        This extension does not make blocked states admissible. The same
+        extended nodal field is used by interpolation, terminal-error
+        accounting, and the continuous cellwise HJB-slack bound.
+        """
+        raw = np.asarray(values, dtype=float).reshape(self.grid.shape)
+        baseline = self._domain_baseline_nodes
+        if baseline is None:
+            return np.where(
+                np.isfinite(raw),
+                raw,
+                self.problem.global_value_lower_bound,
+            ).reshape(-1)
+
+        baseline_grid = baseline.reshape(self.grid.shape)
+        valid = self._node_admissible & np.isfinite(raw)
+        if not np.any(valid) or self._nearest_admissible_indices is None:
+            return np.full(raw.size, self.problem.global_value_lower_bound)
+
+        residual = np.zeros(self.grid.shape, dtype=float)
+        residual[valid] = raw[valid] - baseline_grid[valid]
+        extended = baseline_grid + residual[self._nearest_admissible_indices]
+        extended[valid] = raw[valid]
+        return extended.reshape(-1)
+
+    def _interpolate(self, values: Array, points: Array) -> Array:
+        """Interpolate without renormalizing away non-finite corners.
+
+        In the generic path, zero-weight non-finite corners are ignored and a
+        positive-weight unavailable corner makes the query fall back to the
+        global lower bound. With the certified radial extension, blocked
+        nodes receive a nearest-admissible extension of the residual V-v_rad.
+        The identical extension is used by the continuous cellwise slack and
+        terminal-error estimators, avoiding an artificial zero-valued obstacle
+        layer while retaining explicit fail-closed behavior without a certified
+        extension.
+        """
+        points = np.asarray(points, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        n, dim = points.shape
+        if dim != len(self.grid.shape):
+            raise ValueError("point dimension does not match certificate grid")
+
+        lo = self.grid.lower
+        hi = self.grid.upper
+        h = self.grid.spacing
+        coords = points.copy()
+        valid = np.all(np.isfinite(coords), axis=1)
+
+        for axis in range(dim):
+            if axis in self.grid.periodic_axes:
+                period = hi[axis] - lo[axis]
+                coords[:, axis] = ((coords[:, axis] - lo[axis]) % period) + lo[axis]
+            else:
+                valid &= (coords[:, axis] >= lo[axis]) & (coords[:, axis] <= hi[axis])
+
+        out = np.full(n, self.problem.global_value_lower_bound, dtype=float)
+        outside = np.all(np.isfinite(coords), axis=1) & ~valid
+        if np.any(outside) and self.problem.outside_domain_lower_bound is not None:
+            out[outside] = self._evaluate_outside_domain_lower_bound(
+                coords[outside]
+            )
+        if not np.any(valid):
+            return out
+
+        p = coords[valid]
+        lower_idx = np.empty_like(p, dtype=int)
+        frac = np.empty_like(p, dtype=float)
+
+        for axis, size in enumerate(self.grid.shape):
+            q = (p[:, axis] - lo[axis]) / h[axis]
+            if axis in self.grid.periodic_axes:
+                floor_q = np.floor(q)
+                lower_idx[:, axis] = floor_q.astype(int) % size
+                frac[:, axis] = q - floor_q
+            else:
+                i0 = np.floor(q).astype(int)
+                i0 = np.clip(i0, 0, size - 2)
+                lower_idx[:, axis] = i0
+                frac[:, axis] = np.clip(q - i0, 0.0, 1.0)
+
+        baseline_nodes = self._domain_baseline_nodes
+        interpolation_values = np.asarray(values, dtype=float).reshape(-1)
+        if baseline_nodes is not None:
+            interpolation_values = (
+                self._effective_extension_values(interpolation_values)
+                - baseline_nodes.reshape(-1)
+            )
+
+        result = np.zeros(p.shape[0], dtype=float)
+        invalid_cell = np.zeros(p.shape[0], dtype=bool)
+        for corner_bits in product((0, 1), repeat=dim):
+            weight = np.ones(p.shape[0], dtype=float)
+            idx = []
+            for axis, bit in enumerate(corner_bits):
+                weight *= frac[:, axis] if bit else 1.0 - frac[:, axis]
+                j = lower_idx[:, axis] + bit
+                if axis in self.grid.periodic_axes:
+                    j %= self.grid.shape[axis]
+                else:
+                    j = np.clip(j, 0, self.grid.shape[axis] - 1)
+                idx.append(j)
+            flat = np.ravel_multi_index(tuple(idx), self.grid.shape)
+            corner_val = interpolation_values[flat]
+            positive = weight > 0.0
+            if baseline_nodes is None:
+                invalid_cell |= positive & ~np.isfinite(corner_val)
+                finite = positive & np.isfinite(corner_val)
+                result[finite] += weight[finite] * corner_val[finite]
+            else:
+                result += weight * corner_val
+
+        result[invalid_cell] = self.problem.global_value_lower_bound
+        if baseline_nodes is not None:
+            valid_extension = ~invalid_cell
+            result[valid_extension] += self._evaluate_outside_domain_lower_bound(
+                p[valid_extension]
+            )
+        out[valid] = result
+        return out
+
+    def _bellman_backup(
+        self,
+        previous: Array,
+        *,
+        enforce_monotone: bool = True,
+        apply_control_correction: bool = True,
+    ) -> Array:
+        nodes = self.nodes
+        admissible = self._node_admissible.reshape(-1)
+        candidate = np.full(nodes.shape[0], np.inf, dtype=float)
+
+        for control in np.asarray(self.problem.controls):
+            u = np.asarray(control, dtype=float)
+            if u.ndim == 0:
+                u = u.reshape(1)
+            controls = np.broadcast_to(u, (nodes.shape[0], u.size))
+            next_nodes = nodes + self.problem.dt * self.problem.dynamics(nodes, controls)
+            next_admissible = np.asarray(
+                self.problem.admissible(next_nodes), dtype=bool
+            )
+            next_value = self._interpolate(previous, next_nodes)
+            stage = np.asarray(
+                self.problem.running_cost(nodes, controls), dtype=float
+            ).reshape(-1)
+            feasible = (
+                admissible
+                & next_admissible
+                & np.isfinite(next_value)
+                & np.isfinite(stage)
+            )
+            if np.any(feasible):
+                candidate[feasible] = np.minimum(
+                    candidate[feasible],
+                    self.problem.dt * stage[feasible] + next_value[feasible],
+                )
+
+        # A finite control grid approximates the continuous control infimum
+        # from above. Subtract a Lipschitz covering error before using it as a
+        # lower approximation. If the bound is unavailable, fail conservatively.
+        if apply_control_correction and self.problem.control_lipschitz_bound is not None:
+            finite_candidate = np.isfinite(candidate)
+            if np.any(finite_candidate):
+                controls_array = np.asarray(self.problem.controls, dtype=float)
+                if controls_array.ndim == 1:
+                    scalar_controls = controls_array.reshape(-1)
+                elif controls_array.ndim == 2 and controls_array.shape[1] == 1:
+                    scalar_controls = controls_array[:, 0]
+                else:
+                    scalar_controls = np.asarray([], dtype=float)
+
+                unique_controls = np.unique(scalar_controls)
+                if unique_controls.size < 2:
+                    candidate[finite_candidate] = (
+                        self.problem.global_value_lower_bound
+                    )
+                else:
+                    L_u = float(
+                        self.problem.control_lipschitz_bound(previous, self.grid)
+                    )
+                    if not np.isfinite(L_u) or L_u < 0.0:
+                        candidate[finite_candidate] = (
+                            self.problem.global_value_lower_bound
+                        )
+                    else:
+                        spacing = float(np.max(np.diff(unique_controls)))
+                        candidate[finite_candidate] -= 0.5 * L_u * spacing
+                        candidate[finite_candidate] = np.maximum(
+                            candidate[finite_candidate],
+                            self.problem.global_value_lower_bound,
+                        )
+
+        if enforce_monotone and self._monotone_start:
+            finite_both = np.isfinite(candidate) & np.isfinite(previous)
+            candidate[finite_both] = np.maximum(
+                candidate[finite_both], previous[finite_both]
+            )
+        candidate[~admissible] = np.inf
+        updated = self._apply_safe_domain(candidate)
+        if enforce_monotone and self._monotone_start:
+            # Boundary tapering is a projection after the raw Bellman backup.
+            # Preserve the previous certified nodal field if that projection
+            # would otherwise lower a node and violate monotone-start semantics.
+            finite_both = np.isfinite(updated) & np.isfinite(previous)
+            updated[finite_both] = np.maximum(
+                updated[finite_both], previous[finite_both]
+            )
+        return updated
+
+    def _has_exact_initial_subsolution(self) -> bool:
+        same_terminal_function = (
+            self.problem.initial_lower_bound is None
+            or self.problem.initial_lower_bound is self.problem.terminal_cost
+        )
+        return bool(
+            self.problem.initial_lower_bound_is_subsolution
+            and same_terminal_function
+        )
+
+    def _analytic_initial_bellman_backup(self) -> Array:
+        """Evaluate the K=0 analytic function at successor states directly."""
+        initial_fn = (
+            self.problem.initial_lower_bound
+            if self.problem.initial_lower_bound is not None
+            else self.problem.terminal_cost
+        )
+        nodes = self.nodes
+        admissible = self._node_admissible.reshape(-1)
+        candidate = np.full(nodes.shape[0], np.inf, dtype=float)
+        for control in np.asarray(self.problem.controls):
+            u = np.asarray(control, dtype=float)
+            if u.ndim == 0:
+                u = u.reshape(1)
+            controls = np.broadcast_to(u, (nodes.shape[0], u.size))
+            next_nodes = nodes + self.problem.dt * self.problem.dynamics(nodes, controls)
+            next_admissible = np.asarray(
+                self.problem.admissible(next_nodes), dtype=bool
+            )
+            next_value = np.asarray(initial_fn(next_nodes), dtype=float).reshape(-1)
+            stage = np.asarray(
+                self.problem.running_cost(nodes, controls), dtype=float
+            ).reshape(-1)
+            feasible = (
+                admissible
+                & next_admissible
+                & np.isfinite(next_value)
+                & np.isfinite(stage)
+            )
+            if np.any(feasible):
+                candidate[feasible] = np.minimum(
+                    candidate[feasible],
+                    self.problem.dt * stage[feasible] + next_value[feasible],
+                )
+        return candidate
+
+    def _terminal_cell_cost_lower_bound(
+        self, lo: Array, hi: Array, cell: tuple[int, ...]
+    ) -> float:
+        if self.problem.terminal_cell_lower_bound is not None:
+            return float(self.problem.terminal_cell_lower_bound(lo, hi))
+        lipschitz = self.problem.terminal_cost_lipschitz
+        if lipschitz is None or not np.isfinite(lipschitz):
+            return -np.inf
+        corner_costs = np.asarray(
+            self.problem.terminal_cost(self._cell_corner_points(cell)),
+            dtype=float,
+        ).reshape(-1)
+        if corner_costs.size == 0 or not np.all(np.isfinite(corner_costs)):
+            return -np.inf
+        return float(np.min(corner_costs) - lipschitz * self.grid.cell_diameter)
+
+    def _estimate_terminal_error(self, values: Array) -> float:
+        """Bound positive terminal slack over the full Bolza terminal domain.
+
+        The primal IGO solver evaluates terminal_cost(x_T) for every
+        admissible terminal state; it does not impose terminal_set as a hard
+        endpoint constraint. Therefore epsilon_terminal must bound
+        sup_X (V - g)_+, not only the mismatch on terminal_set. The latter is
+        valid only for a primal problem whose terminal measure is constrained
+        to that set.
+        """
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
+            return 0.0
+
+        upper = 0.0
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
+        )
+
+        if self.problem.outside_domain_lower_bound is not None:
+            # In the radial-extension path V = g + multilinear(residual).
+            # The maximum of a multilinear function over a cell is attained
+            # at a corner, so all cells intersecting the admissible domain
+            # must contribute to the global terminal-slack bound.
+            effective_values = self._effective_extension_values(values)
+            baseline = self._domain_baseline_nodes
+            if baseline is None:
+                return np.inf
+            residual = effective_values - baseline
+            for cell in np.ndindex(cell_shape):
+                lo, hi = self._cell_bounds(cell)
+                if (
+                    self.problem.cell_is_fully_inadmissible is not None
+                    and self.problem.cell_is_fully_inadmissible(lo, hi)
+                ):
+                    continue
+                corners = self._cell_corner_values(residual, cell)
+                if not np.all(np.isfinite(corners)):
+                    return np.inf
+                upper = max(upper, float(np.max(corners)))
+            return float(max(0.0, upper))
+
+        # Generic finite-grid path: bound V(x)-g(x) over every cell, using a
+        # conservative upper bound on V and lower bound on g. Restricting this
+        # loop to cells intersecting terminal_set would under-correct the
+        # current soft-terminal-cost objective used by the primal solver.
+        for cell in np.ndindex(cell_shape):
+            lo, hi = self._cell_bounds(cell)
+            if (
+                self.problem.cell_is_fully_inadmissible is not None
+                and self.problem.cell_is_fully_inadmissible(lo, hi)
+            ):
+                continue
+
+            corners = self._cell_corner_values(values, cell)
+            if np.all(np.isfinite(corners)):
+                value_upper = float(np.max(corners))
+            else:
+                finite_corners = corners[np.isfinite(corners)]
+                if finite_corners.size == 0:
+                    return np.inf
+                if not np.allclose(
+                    finite_corners,
+                    self.problem.global_value_lower_bound,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    return np.inf
+                value_upper = float(self.problem.global_value_lower_bound)
+
+            terminal_lower = self._terminal_cell_cost_lower_bound(lo, hi, cell)
+            if not np.isfinite(terminal_lower):
+                return np.inf
+            upper = max(upper, value_upper - terminal_lower)
+
+        return float(max(0.0, upper))
+
+    def _estimate_slack_error(self, values: Array) -> float:
+        self._epsilon_coarse_worst_cell = None
+        self._epsilon_coarse_cell_lowers = {}
+        self._epsilon_final_cell_lowers = {}
+        self._epsilon_refined_cell_set = set()
+        self._epsilon_deep_refined_cell_set = set()
+        self._epsilon_refined_worst_cell = None
+        self._epsilon_refined_worst_violation = 0.0
+        self._epsilon_deep_refined_worst_cell = None
+        self._epsilon_deep_refined_worst_violation = 0.0
+        self._epsilon_unrefined_worst_cell = None
+        self._epsilon_unrefined_worst_violation = 0.0
+        self._epsilon_refinement_budget_exhausted = False
+        self._epsilon_deep_refinement_budget_exhausted = False
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
+            self._epsilon_worst_cell = None
+            self._epsilon_coarse = 0.0
+            self._epsilon_refined_cells = 0
+            return 0.0
+        # Nodal finite differences are not a continuous HJB-slack certificate.
+        # Without a cellwise one-sided bound, disable pruning for this problem.
+        if self.problem.cell_slack_lower_bound is None:
+            self._epsilon_worst_cell = None
+            self._epsilon_coarse = np.inf
+            self._epsilon_refined_cells = 0
+            return np.inf
+
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
+        )
+        cell_lowers: dict[tuple[int, ...], float] = {}
+        effective_values = None
+        if self.problem.outside_domain_lower_bound is not None:
+            effective_values = self._effective_extension_values(values)
+
+        for cell in np.ndindex(cell_shape):
+            corners = self._cell_corner_values(values, cell)
+            if self.problem.outside_domain_lower_bound is not None:
+                lo, hi = self._cell_bounds(cell)
+                if (
+                    self.problem.cell_is_fully_inadmissible is not None
+                    and self.problem.cell_is_fully_inadmissible(lo, hi)
+                ):
+                    continue
+                # Use the same extended nodal field as interpolation and
+                # terminal-error accounting.
+                lower = float(
+                    self.problem.cell_slack_lower_bound(
+                        effective_values, self.grid, cell
+                    )
+                )
+            elif not np.all(np.isfinite(corners)):
+                finite_corners = corners[np.isfinite(corners)]
+                if finite_corners.size == 0:
+                    lo, hi = self._cell_bounds(cell)
+                    if (
+                        self.problem.cell_is_fully_inadmissible is not None
+                        and self.problem.cell_is_fully_inadmissible(lo, hi)
+                    ):
+                        continue
+                    self._epsilon_worst_cell = cell
+                    self._epsilon_coarse = np.inf
+                    self._epsilon_refined_cells = 0
+                    return np.inf
+                if not np.allclose(
+                    finite_corners,
+                    self.problem.global_value_lower_bound,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    self._epsilon_worst_cell = cell
+                    self._epsilon_coarse = np.inf
+                    self._epsilon_refined_cells = 0
+                    return np.inf
+                lower = float(self.problem.running_cost_lower_bound)
+            else:
+                lower = float(
+                    self.problem.cell_slack_lower_bound(values, self.grid, cell)
+                )
+            if not np.isfinite(lower):
+                self._epsilon_worst_cell = cell
+                self._epsilon_coarse = np.inf
+                self._epsilon_refined_cells = 0
+                return np.inf
+            cell_lowers[cell] = lower
+
+        coarse_epsilon = max(
+            (max(0.0, -lower) for lower in cell_lowers.values()),
+            default=0.0,
+        )
+        self._epsilon_coarse = float(coarse_epsilon)
+        self._epsilon_coarse_cell_lowers = dict(cell_lowers)
+        if coarse_epsilon > 0.0 and cell_lowers:
+            self._epsilon_coarse_worst_cell = max(
+                cell_lowers,
+                key=lambda cell: max(0.0, -cell_lowers[cell]),
+            )
+
+        # Re-evaluate the near-active set until the global maximum is stable
+        # or the explicit cell-refinement budget is exhausted.
+        refined_callback = self.problem.cell_slack_lower_bound_refined
+        refined_cells: set[tuple[int, ...]] = set()
+        max_refined_cells = self._epsilon_refinement_budget
+        max_candidates_per_pass = 64
+        if (
+            refined_callback is not None
+            and effective_values is not None
+            and coarse_epsilon > 0.0
+        ):
+            while len(refined_cells) < max_refined_cells:
+                current_worst = max(
+                    (max(0.0, -lower) for lower in cell_lowers.values()),
+                    default=0.0,
+                )
+                if current_worst <= 0.0:
+                    break
+                unrefined = [
+                    cell for cell in cell_lowers if cell not in refined_cells
+                ]
+                if not unrefined:
+                    break
+                threshold = 0.8 * current_worst
+                candidates = [
+                    cell for cell in unrefined
+                    if max(0.0, -cell_lowers[cell]) >= threshold
+                ]
+                # No candidate means the active global maximum is already
+                # refined; lower-impact cells cannot change epsilon yet.
+                if not candidates:
+                    break
+                candidates.sort(
+                    key=lambda cell: max(0.0, -cell_lowers[cell]),
+                    reverse=True,
+                )
+                remaining_budget = max_refined_cells - len(refined_cells)
+                candidates = candidates[
+                    :min(max_candidates_per_pass, remaining_budget)
+                ]
+                for cell in candidates:
+                    refined_lower = float(
+                        refined_callback(effective_values, self.grid, cell)
+                    )
+                    if not np.isfinite(refined_lower):
+                        self._epsilon_worst_cell = cell
+                        self._epsilon_refined_cells = len(refined_cells)
+                        self._epsilon_refined_cell_set = set(refined_cells)
+                        self._epsilon_final_cell_lowers = dict(cell_lowers)
+                        return np.inf
+                    # The maximum of two certified lower bounds remains a
+                    # certified lower bound for the same parent-cell infimum.
+                    cell_lowers[cell] = max(cell_lowers[cell], refined_lower)
+                    refined_cells.add(cell)
+
+        # Spend a separate, small budget on a deeper 4x4x2 enclosure for
+        # the highest-impact cells already processed by the first refinement
+        # level. This targets persistent local bottlenecks without multiplying
+        # the cost of every cell in the global refinement set.
+        deep_refined_cells: set[tuple[int, ...]] = set()
+        deep_callback = self.problem.cell_slack_lower_bound_deep
+        max_deep_refined_cells = self._epsilon_deep_refinement_budget
+        if (
+            deep_callback is not None
+            and effective_values is not None
+            and max_deep_refined_cells > 0
+            and refined_cells
+        ):
+            global_worst_before_deep = max(
+                (max(0.0, -lower) for lower in cell_lowers.values()),
+                default=0.0,
+            )
+            deep_candidates = [
+                cell for cell in refined_cells
+                if max(0.0, -cell_lowers[cell])
+                >= 0.8 * global_worst_before_deep
+            ]
+            deep_candidates.sort(
+                key=lambda cell: max(0.0, -cell_lowers[cell]),
+                reverse=True,
+            )
+            deep_candidates = deep_candidates[:max_deep_refined_cells]
+            for cell in deep_candidates:
+                deep_lower = float(
+                    deep_callback(effective_values, self.grid, cell)
+                )
+                if not np.isfinite(deep_lower):
+                    self._epsilon_worst_cell = cell
+                    self._epsilon_refined_cells = len(refined_cells)
+                    self._epsilon_refined_cell_set = set(refined_cells)
+                    self._epsilon_deep_refined_cell_set = set(deep_refined_cells)
+                    self._epsilon_final_cell_lowers = dict(cell_lowers)
+                    return np.inf
+                # Both enclosures bound the same parent-cell infimum from
+                # below, so their maximum remains a valid certified lower bound.
+                cell_lowers[cell] = max(cell_lowers[cell], deep_lower)
+                deep_refined_cells.add(cell)
+
+        self._epsilon_refined_cells = len(refined_cells)
+        self._epsilon_refined_cell_set = set(refined_cells)
+        self._epsilon_deep_refined_cell_set = set(deep_refined_cells)
+        self._epsilon_final_cell_lowers = dict(cell_lowers)
+        for cell, lower in cell_lowers.items():
+            violation = max(0.0, -lower)
+            if cell in deep_refined_cells:
+                if violation > self._epsilon_deep_refined_worst_violation:
+                    self._epsilon_deep_refined_worst_violation = violation
+                    self._epsilon_deep_refined_worst_cell = cell
+            if cell in refined_cells:
+                if violation > self._epsilon_refined_worst_violation:
+                    self._epsilon_refined_worst_violation = violation
+                    self._epsilon_refined_worst_cell = cell
+            else:
+                if violation > self._epsilon_unrefined_worst_violation:
+                    self._epsilon_unrefined_worst_violation = violation
+                    self._epsilon_unrefined_worst_cell = cell
+        if (
+            max_deep_refined_cells > 0
+            and len(deep_refined_cells) >= max_deep_refined_cells
+            and cell_lowers
+        ):
+            final_worst = max(
+                (max(0.0, -lower) for lower in cell_lowers.values()),
+                default=0.0,
+            )
+            remaining_deep_candidates = [
+                cell for cell in refined_cells if cell not in deep_refined_cells
+            ]
+            self._epsilon_deep_refinement_budget_exhausted = bool(
+                remaining_deep_candidates
+                and final_worst > 0.0
+                and max(
+                    max(0.0, -cell_lowers[cell])
+                    for cell in remaining_deep_candidates
+                ) >= 0.8 * final_worst
+            )
+        if len(refined_cells) >= max_refined_cells and cell_lowers:
+            final_worst = max(
+                (max(0.0, -lower) for lower in cell_lowers.values()),
+                default=0.0,
+            )
+            unrefined = [
+                cell for cell in cell_lowers if cell not in refined_cells
+            ]
+            self._epsilon_refinement_budget_exhausted = bool(
+                unrefined
+                and final_worst > 0.0
+                and max(max(0.0, -cell_lowers[cell]) for cell in unrefined)
+                >= 0.8 * final_worst
+            )
+
+        worst = 0.0
+        worst_cell = None
+        for cell, lower in cell_lowers.items():
+            violation = max(0.0, -lower)
+            if violation > worst:
+                worst = violation
+                worst_cell = cell
+        self._epsilon_worst_cell = worst_cell
+        return float(worst)
+
+    def _generic_slack_error(self, values: Array) -> float:
+        nodes = self.nodes
+        admissible = np.asarray(self.problem.admissible(nodes), dtype=bool)
+        if not np.any(admissible):
+            return 0.0
+        gradients = np.gradient(
+            values.reshape(self.grid.shape),
+            *self.grid.spacing,
+            edge_order=1,
+        )
+        grad = np.stack([g.reshape(-1) for g in gradients], axis=1)
+        worst = 0.0
+        for control in np.asarray(self.problem.controls):
+            u = np.asarray(control, dtype=float)
+            if u.ndim == 0:
+                u = u.reshape(1)
+            u_batch = np.broadcast_to(u, (nodes.shape[0], u.size))
+            dyn = np.asarray(self.problem.dynamics(nodes, u_batch), dtype=float)
+            stage = np.asarray(
+                self.problem.running_cost(nodes, u_batch), dtype=float
+            ).reshape(-1)
+            slack = stage + np.sum(grad * dyn, axis=1)
+            finite = admissible & np.isfinite(slack)
+            if np.any(finite):
+                worst = max(
+                    worst,
+                    float(np.max(np.maximum(-slack[finite], 0.0))),
+                )
+        return worst
+
+    def build(self) -> CertificateReport:
+        for _ in range(self.iterations):
+            previous = self.values[-1]
+            updated = self._bellman_backup(previous)
+            finite = np.isfinite(previous) & np.isfinite(updated)
+            if np.any(finite):
+                self._bellman_monotone &= bool(
+                    np.all(updated[finite] >= previous[finite] - 1e-10)
+                )
+            self.values.append(updated)
+
+        selected = self.values[-1]
+        self._epsilon_terminal = self._estimate_terminal_error(selected)
+        self._epsilon = self._estimate_slack_error(selected)
+
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
+            # Do not test a grid interpolation of the analytic warm start.
+            # Evaluate the known continuous function at successor states.
+            backup = self._analytic_initial_bellman_backup()
+        else:
+            backup = self._bellman_backup(
+                selected,
+                enforce_monotone=False,
+                apply_control_correction=False,
+            )
+        finite = self._node_admissible.reshape(-1) & np.isfinite(selected)
+        self._discrete_subsolution = bool(
+            np.any(finite)
+            and np.all(
+                np.isfinite(backup[finite])
+                & (backup[finite] >= selected[finite] - 1e-9)
+            )
+        )
+        self._built = True
+
+        finite_values = selected[np.isfinite(selected)]
+        initial_value = float(np.min(finite_values)) if finite_values.size else np.inf
+        return CertificateReport(
+            iterations=self.iterations,
+            epsilon=float(self._epsilon),
+            epsilon_terminal=float(self._epsilon_terminal),
+            initial_value=initial_value,
+            grid_nodes=int(self.nodes.shape[0]),
+            admissible_nodes=int(
+                np.count_nonzero(self.problem.admissible(self.nodes))
+            ),
+            bellman_monotone=self._bellman_monotone,
+            discrete_subsolution=self._discrete_subsolution,
+            epsilon_worst_cell=self._epsilon_worst_cell,
+        )
+
+    @property
+    def epsilon(self) -> float:
+        if not self._built:
+            raise RuntimeError("build() must be called before reading epsilon")
+        return self._epsilon
+
+    @property
+    def epsilon_terminal(self) -> float:
+        if not self._built:
+            raise RuntimeError("build() must be called before reading epsilon_terminal")
+        return self._epsilon_terminal
+
+    def value_batch(self, states: Array) -> Array:
+        """Evaluate certificate values for a batch of states.
+
+        This is numerically equivalent to repeated :meth:`value` calls, but
+        performs interpolation in one vectorized pass. In certificate-guided
+        IGO, pruning queries dominate the rollout loop, so batching avoids
+        hundreds of thousands of Python-level scalar interpolation calls.
+        """
+        if not self._built:
+            raise RuntimeError("build() must be called before querying a certificate")
+        points = np.asarray(states, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        if points.ndim != 2 or points.shape[1] != len(self.grid.shape):
+            raise ValueError("state dimension does not match certificate grid")
+
+        result = np.full(points.shape[0], np.inf, dtype=float)
+        admissible = np.asarray(
+            self.problem.admissible(points), dtype=bool
+        ).reshape(-1)
+        if not np.any(admissible):
+            return result
+
+        valid_points = points[admissible]
+        if self.iterations == 0 and self._has_exact_initial_subsolution():
+            initial_fn = (
+                self.problem.initial_lower_bound
+                if self.problem.initial_lower_bound is not None
+                else self.problem.terminal_cost
+            )
+            values = np.asarray(initial_fn(valid_points), dtype=float).reshape(-1)
+        else:
+            values = self._interpolate(self.values[-1], valid_points)
+        if values.size != valid_points.shape[0]:
+            raise ValueError("certificate value function returned an invalid batch size")
+        result[admissible] = values
+        return result
+
+    def value(self, state: Sequence[float]) -> float:
+        point = np.asarray(state, dtype=float).reshape(-1)
+        if point.size != len(self.grid.shape):
+            raise ValueError("state dimension does not match certificate grid")
+        return float(self.value_batch(point)[0])
+
+    def corrected_lower_bound_batch(
+        self, states: Array, remaining_time: float | Array
+    ) -> Array:
+        """Vectorized corrected lower bound; unavailable values disable pruning."""
+        points = np.asarray(states, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        if points.ndim != 2 or points.shape[1] != len(self.grid.shape):
+            raise ValueError("state dimension does not match certificate grid")
+        remaining = np.asarray(remaining_time, dtype=float)
+        if remaining.ndim == 0:
+            remaining = np.full(points.shape[0], float(remaining), dtype=float)
+        else:
+            remaining = remaining.reshape(-1)
+            if remaining.size != points.shape[0]:
+                raise ValueError("remaining_time must be scalar or match the state batch")
+        if np.any(~np.isfinite(remaining)) or np.any(remaining < 0.0):
+            raise ValueError("remaining_time must be finite and non-negative")
+
+        result = np.full(points.shape[0], -np.inf, dtype=float)
+        if not np.isfinite(self.epsilon) or not np.isfinite(self.epsilon_terminal):
+            return result
+        values = self.value_batch(points)
+        usable = np.isfinite(values)
+        result[usable] = (
+            values[usable]
+            - self.epsilon * remaining[usable]
+            - self.epsilon_terminal
+        )
+        return result
+
+    def corrected_lower_bound(
+        self, state: Sequence[float], remaining_time: float
+    ) -> float:
+        point = np.asarray(state, dtype=float).reshape(-1)
+        return float(self.corrected_lower_bound_batch(point, remaining_time)[0])
+
+    def prefix_bound_batch(
+        self,
+        prefix_cost: float | Array,
+        states: Array,
+        remaining_time: float | Array,
+    ) -> Array:
+        """Vectorized prefix bound for IGO rollouts."""
+        points = np.asarray(states, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        prefix = np.asarray(prefix_cost, dtype=float)
+        if prefix.ndim == 0:
+            prefix = np.full(points.shape[0], float(prefix), dtype=float)
+        else:
+            prefix = prefix.reshape(-1)
+            if prefix.size != points.shape[0]:
+                raise ValueError("prefix_cost must be scalar or match the state batch")
+        corrected = self.corrected_lower_bound_batch(points, remaining_time)
+        result = np.full(points.shape[0], -np.inf, dtype=float)
+        usable = np.isfinite(prefix) & np.isfinite(corrected)
+        result[usable] = prefix[usable] + corrected[usable]
+        return result
+
+    def prefix_bound(
+        self,
+        prefix_cost: float,
+        state: Sequence[float],
+        remaining_time: float,
+    ) -> float:
+        return float(
+            self.prefix_bound_batch(prefix_cost, np.asarray(state, dtype=float), remaining_time)[0]
+        )
+
+    def cell_slack_neighborhood(
+        self,
+        center: Optional[tuple[int, ...]] = None,
+        *,
+        radius: int = 1,
+    ) -> list[dict[str, object]]:
+        """Return auditable slack bounds around a cell without changing the gate.
+
+        This is diagnostic-only: it reports every nearby cell, including
+        cells excluded because they are wholly inadmissible. It never changes
+        epsilon or the set of cells used by :meth:`_estimate_slack_error`.
+        """
+        if not self._built:
+            raise RuntimeError("build() must be called before cell diagnostics")
+        if isinstance(radius, bool) or int(radius) != radius or radius < 0:
+            raise ValueError("radius must be a non-negative integer")
+        cell_shape = tuple(
+            n if axis in self.grid.periodic_axes else n - 1
+            for axis, n in enumerate(self.grid.shape)
+        )
+        if center is None:
+            center = self._epsilon_worst_cell
+        if center is None:
+            raise ValueError("no worst cell is available; pass an explicit center")
+        center = tuple(int(i) for i in center)
+        if len(center) != len(cell_shape) or any(
+            i < 0 or i >= cell_shape[axis] for axis, i in enumerate(center)
+        ):
+            raise ValueError("center cell is outside the certificate grid")
+
+        selected = self.values[-1]
+        has_extension = self.problem.outside_domain_lower_bound is not None
+        effective_values = (
+            self._effective_extension_values(selected)
+            if has_extension
+            else selected
+        )
+        offsets = range(-int(radius), int(radius) + 1)
+        indices: set[tuple[int, ...]] = set()
+        for delta in product(offsets, repeat=len(cell_shape)):
+            cell = []
+            valid = True
+            for axis, (index, shift) in enumerate(zip(center, delta)):
+                candidate = index + shift
+                if axis in self.grid.periodic_axes:
+                    candidate %= cell_shape[axis]
+                elif candidate < 0 or candidate >= cell_shape[axis]:
+                    valid = False
+                    break
+                cell.append(candidate)
+            if valid:
+                indices.add(tuple(cell))
+
+        diagnostics: list[dict[str, object]] = []
+        for cell in sorted(indices):
+            lo, hi = self._cell_bounds(cell)
+            fully_blocked = bool(
+                self.problem.cell_is_fully_inadmissible is not None
+                and self.problem.cell_is_fully_inadmissible(lo, hi)
+            )
+            corners = self._cell_corner_values(selected, cell)
+            lower: Optional[float]
+            if fully_blocked:
+                lower = None
+            elif self.problem.cell_slack_lower_bound is None:
+                lower = None
+            elif has_extension:
+                raw_lower = float(
+                    self.problem.cell_slack_lower_bound(
+                        effective_values, self.grid, cell
+                    )
+                )
+                lower = raw_lower if np.isfinite(raw_lower) else None
+            elif not np.all(np.isfinite(corners)):
+                finite_corners = corners[np.isfinite(corners)]
+                if finite_corners.size and np.allclose(
+                    finite_corners,
+                    self.problem.global_value_lower_bound,
+                    rtol=0.0,
+                    atol=1e-12,
+                ):
+                    lower = float(self.problem.running_cost_lower_bound)
+                else:
+                    lower = None
+            else:
+                raw_lower = float(
+                    self.problem.cell_slack_lower_bound(
+                        selected, self.grid, cell
+                    )
+                )
+                lower = raw_lower if np.isfinite(raw_lower) else None
+
+            coarse_lower = lower
+            certified_lower = self._epsilon_final_cell_lowers.get(
+                cell, coarse_lower
+            )
+            refined_in_certificate = cell in self._epsilon_refined_cell_set
+            deep_refined_in_certificate = (
+                cell in self._epsilon_deep_refined_cell_set
+            )
+            corner_indices = list(self._cell_corner_indices(cell))
+            touches_halo = any(
+                self._obstacle_halo_mask[index] for index in corner_indices
+            )
+            boundary_distances = [
+                min(cell[axis], cell_shape[axis] - 1 - cell[axis])
+                for axis in range(len(cell_shape))
+                if axis not in self.grid.periodic_axes
+            ]
+            boundary_distance = (
+                int(min(boundary_distances)) if boundary_distances else None
+            )
+            slack_components = None
+            if (
+                not fully_blocked
+                and lower is not None
+                and self.problem.cell_slack_diagnostics is not None
+                and (cell == center or cell == self._epsilon_worst_cell)
+            ):
+                slack_components = self.problem.cell_slack_diagnostics(
+                    effective_values, self.grid, cell
+                )
+            diagnostics.append(
+                {
+                    "cell": list(cell),
+                    "is_center": cell == center,
+                    "is_reported_worst_cell": cell == self._epsilon_worst_cell,
+                    "is_coarse_worst_cell": cell == self._epsilon_coarse_worst_cell,
+                    "lower": lo.tolist(),
+                    "upper": hi.tolist(),
+                    "boundary_distance_cells": boundary_distance,
+                    "touches_obstacle_halo": bool(touches_halo),
+                    "fully_inadmissible": fully_blocked,
+                    "included_in_slack_gate": bool(
+                        not fully_blocked and certified_lower is not None
+                    ),
+                    "coarse_slack_lower_bound": coarse_lower,
+                    "slack_lower_bound": certified_lower,
+                    "refined_in_certificate": refined_in_certificate,
+                    "deep_refined_in_certificate": deep_refined_in_certificate,
+                    "slack_components": slack_components,
+                    "violation": (
+                        max(0.0, -certified_lower)
+                        if certified_lower is not None else None
+                    ),
+                }
+            )
+        diagnostics.sort(
+            key=lambda row: (
+                row["slack_lower_bound"] is None,
+                row["slack_lower_bound"]
+                if row["slack_lower_bound"] is not None
+                else 0.0,
+            )
+        )
+        return diagnostics
+
+
+def radial_terminal_cost(
+    position: Array,
+    goal: Sequence[float],
+    goal_radius: float,
+    q_position: float,
+    forward_speed: float,
+) -> Array:
+    """Paper Eq. (24): integrate q_p d(t)^2 until reaching radius rho."""
+    p = np.asarray(position, dtype=float)
+    goal = np.asarray(goal, dtype=float)
+    d = np.linalg.norm(p[..., :2] - goal[:2], axis=-1)
+    exterior_cube = np.maximum(d**3 - goal_radius**3, 0.0)
+    return q_position * exterior_cube / (3.0 * forward_speed)
+
+
+def make_paper_unicycle_problem(
+    *,
+    goal: Sequence[float],
+    goal_radius: float,
+    forward_speed: float,
+    q_position: float,
+    r_control: float,
+    control_min: float,
+    control_max: float,
+    dt: float,
+    obstacles: Sequence[tuple[float, float, float, float]] = (),
+    n_controls: int = 21,
+    deep_refinement_subdivisions: Sequence[int] = (4, 4, 2),
+) -> FOMCertificateProblem:
+    """Construct the Section V-A constant-speed unicycle problem.
+
+    Obstacles are axis-aligned rectangles (xmin, xmax, ymin, ymax).
+    """
+    if forward_speed <= 0.0:
+        raise ValueError("forward_speed must be positive")
+    if q_position <= 0.0 or r_control <= 0.0:
+        raise ValueError("q_position and r_control must be positive")
+    if goal_radius <= 0.0:
+        raise ValueError("goal_radius must be positive")
+    if control_max <= control_min:
+        raise ValueError("control_max must exceed control_min")
+    if n_controls < 2:
+        raise ValueError("n_controls must be at least two")
+    try:
+        raw_deep_subdivisions = tuple(deep_refinement_subdivisions)
+    except TypeError as exc:
+        raise ValueError(
+            "deep_refinement_subdivisions must contain three positive integers"
+        ) from exc
+    if (
+        len(raw_deep_subdivisions) != 3
+        or any(
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            or int(value) < 1
+            for value in raw_deep_subdivisions
+        )
+    ):
+        raise ValueError(
+            "deep_refinement_subdivisions must contain three positive integers"
+        )
+    deep_subdivisions = tuple(int(value) for value in raw_deep_subdivisions)
+
+    controls = np.linspace(
+        control_min, control_max, n_controls, dtype=float
+    )[:, None]
+    goal = np.asarray(goal, dtype=float)
+
+    def dynamics(x: Array, u: Array) -> Array:
+        phi = x[:, 2]
+        omega = u[:, 0]
+        return np.column_stack(
+            (
+                forward_speed * np.cos(phi),
+                forward_speed * np.sin(phi),
+                omega,
+            )
+        )
+
+    def running_cost(x: Array, u: Array) -> Array:
+        d2 = np.sum((x[:, :2] - goal[:2]) ** 2, axis=1)
+        return q_position * d2 + r_control * u[:, 0] ** 2
+
+    def terminal_cost(x: Array) -> Array:
+        return radial_terminal_cost(
+            x, goal, goal_radius, q_position, forward_speed
+        )
+
+    def admissible(x: Array) -> Array:
+        ok = np.ones(x.shape[0], dtype=bool)
+        for xmin, xmax, ymin, ymax in obstacles:
+            inside = (
+                (x[:, 0] >= xmin)
+                & (x[:, 0] <= xmax)
+                & (x[:, 1] >= ymin)
+                & (x[:, 1] <= ymax)
+            )
+            ok &= ~inside
+        return ok
+
+    def terminal_set(x: Array) -> Array:
+        return (
+            np.linalg.norm(x[:, :2] - goal[:2], axis=1)
+            <= goal_radius
+        )
+
+    def terminal_cell_intersects(lo: Array, hi: Array) -> bool:
+        closest = np.clip(goal[:2], lo[:2], hi[:2])
+        if np.linalg.norm(closest - goal[:2]) > goal_radius:
+            return False
+        # Cells wholly contained in one obstacle contain no admissible terminal
+        # states and do not participate in the terminal-slack maximum.
+        for xmin, xmax, ymin, ymax in obstacles:
+            if (
+                lo[0] >= xmin and hi[0] <= xmax
+                and lo[1] >= ymin and hi[1] <= ymax
+            ):
+                return False
+        return True
+
+    def terminal_cell_lower_bound(lo: Array, hi: Array) -> float:
+        # The terminal cost is exactly zero on the target set.
+        return 0.0
+
+    def cell_is_fully_inadmissible(lo: Array, hi: Array) -> bool:
+        # An entire tensor cell contained in one obstacle has no admissible
+        # states, so the HJB slack constraint is not imposed on that cell.
+        for xmin, xmax, ymin, ymax in obstacles:
+            if (
+                lo[0] >= xmin and hi[0] <= xmax
+                and lo[1] >= ymin and hi[1] <= ymax
+            ):
+                return True
+        return False
+
+    def control_lipschitz_bound(values: Array, grid: RegularGrid) -> float:
+        shaped = np.asarray(values, dtype=float).reshape(grid.shape)
+        if np.any(~np.isfinite(shaped)):
+            shaped = np.where(
+                np.isfinite(shaped), shaped, 0.0
+            )
+        next_heading = np.roll(shaped, -1, axis=2)
+        finite_edges = np.isfinite(shaped) & np.isfinite(next_heading)
+        if not np.any(finite_edges):
+            return np.inf
+        edge_slopes = np.abs(next_heading - shaped) / grid.spacing[2]
+        max_grad_phi = float(np.max(edge_slopes[finite_edges]))
+        max_u = max(abs(control_min), abs(control_max))
+        # d/du [dt*ell(x,u) + V(x + dt*f(x,u))]
+        # is bounded by dt*(2*r_u*|u| + |dV/dphi|).
+        return dt * (max_grad_phi + 2.0 * r_control * max_u)
+
+    radial_node_cache: dict[tuple, Array] = {}
+
+    def cell_slack_lower_bound_impl(
+        values: Array,
+        grid: RegularGrid,
+        cell: tuple[int, int, int],
+        subdivisions: int | tuple[int, int, int],
+        *,
+        return_components: bool = False,
+    ) -> float | dict[str, object]:
+        """Conservative HJB-slack bound, optionally with a term decomposition."""
+        if isinstance(subdivisions, int):
+            subdivisions_per_axis = (subdivisions,) * 3
+        else:
+            subdivisions_per_axis = tuple(int(value) for value in subdivisions)
+        if (
+            len(subdivisions_per_axis) != 3
+            or any(value < 1 for value in subdivisions_per_axis)
+        ):
+            raise ValueError("subdivisions must be positive for all three axes")
+        subdivision_scale = np.asarray(subdivisions_per_axis, dtype=float)
+        h = grid.spacing
+        nodal_values = np.asarray(values, dtype=float).reshape(grid.shape)
+        if np.any(~np.isfinite(nodal_values)):
+            nodal_values = np.where(np.isfinite(nodal_values), nodal_values, 0.0)
+
+        grid_key = (
+            tuple(grid.lower.tolist()),
+            tuple(grid.upper.tolist()),
+            grid.shape,
+            grid.periodic_axes,
+        )
+        radial_nodes = radial_node_cache.get(grid_key)
+        if radial_nodes is None:
+            radial_nodes = radial_terminal_cost(
+                grid.nodes, goal, goal_radius, q_position, forward_speed
+            ).reshape(grid.shape)
+            radial_node_cache[grid_key] = radial_nodes
+        residual_nodes = nodal_values - radial_nodes
+
+        corner_indices = []
+        for bits in product((0, 1), repeat=3):
+            idx = []
+            for axis, bit in enumerate(bits):
+                j = cell[axis] + bit
+                if axis in grid.periodic_axes:
+                    j %= grid.shape[axis]
+                idx.append(j)
+            corner_indices.append(tuple(idx))
+        corner_residual = np.empty((2, 2, 2), dtype=float)
+        for bits, idx in zip(product((0, 1), repeat=3), corner_indices):
+            corner_residual[bits] = residual_nodes[idx]
+
+        parent_lo = grid.lower + np.asarray(cell, dtype=float) * h
+
+        def interval_product(a0, a1, b0, b1):
+            products = (a0 * b0, a0 * b1, a1 * b0, a1 * b1)
+            return min(products), max(products)
+
+        def product_lower(a0, a1, b0, b1):
+            return min(a0 * b0, a0 * b1, a1 * b0, a1 * b1)
+
+        def trig_interval(fn, lo, hi):
+            vals = [float(fn(lo)), float(fn(hi))]
+            if fn is np.sin:
+                k0 = int(np.ceil((lo - np.pi / 2.0) / np.pi))
+                k1 = int(np.floor((hi - np.pi / 2.0) / np.pi))
+                for k in range(k0, k1 + 1):
+                    vals.append(float(fn(np.pi / 2.0 + k * np.pi)))
+            else:
+                k0 = int(np.ceil(lo / np.pi))
+                k1 = int(np.floor(hi / np.pi))
+                for k in range(k0, k1 + 1):
+                    vals.append(float(fn(k * np.pi)))
+            return min(vals), max(vals)
+
+        subcell_reports: list[dict[str, object]] = []
+        for sub_index in product(
+            *(range(count) for count in subdivisions_per_axis)
+        ):
+            frac_lo = np.asarray(sub_index, dtype=float) / subdivision_scale
+            frac_hi = (
+                np.asarray(sub_index, dtype=float) + 1.0
+            ) / subdivision_scale
+            sub_lo = parent_lo + frac_lo * h
+            sub_hi = parent_lo + frac_hi * h
+
+            # The derivative of a trilinear interpolant in one axis is
+            # bilinear in the other two. Its extrema on a subrectangle occur
+            # at the four endpoint combinations of those two coordinates.
+            grad_bounds = []
+            for axis in range(3):
+                other_axes = [a for a in range(3) if a != axis]
+                derivative_values = []
+                for endpoint_bits in product((0, 1), repeat=2):
+                    other_t = [
+                        frac_lo[a] if bit == 0 else frac_hi[a]
+                        for a, bit in zip(other_axes, endpoint_bits)
+                    ]
+                    derivative = 0.0
+                    for corner_bits in product((0, 1), repeat=2):
+                        idx0 = [0, 0, 0]
+                        idx1 = [0, 0, 0]
+                        weight = 1.0
+                        for j, other_axis in enumerate(other_axes):
+                            bit = corner_bits[j]
+                            idx0[other_axis] = bit
+                            idx1[other_axis] = bit
+                            t = other_t[j]
+                            weight *= t if bit else 1.0 - t
+                        idx0[axis] = 0
+                        idx1[axis] = 1
+                        derivative += weight * (
+                            corner_residual[tuple(idx1)]
+                            - corner_residual[tuple(idx0)]
+                        )
+                    derivative_values.append(float(derivative / h[axis]))
+                grad_bounds.append(
+                    (min(derivative_values), max(derivative_values))
+                )
+
+            # Interval enclosure of the analytic radial gradient on this
+            # subcell: grad_p v_rad = (q_position / v_bar) * d * (p-goal).
+            xlo, xhi = float(sub_lo[0]), float(sub_hi[0])
+            ylo, yhi = float(sub_lo[1]), float(sub_hi[1])
+            dx0, dx1 = xlo - goal[0], xhi - goal[0]
+            dy0, dy1 = ylo - goal[1], yhi - goal[1]
+            dx_min = 0.0 if dx0 <= 0.0 <= dx1 else min(abs(dx0), abs(dx1))
+            dy_min = 0.0 if dy0 <= 0.0 <= dy1 else min(abs(dy0), abs(dy1))
+            d_min = float(np.hypot(dx_min, dy_min))
+            d_max = float(max(
+                np.hypot(dx, dy)
+                for dx in (dx0, dx1)
+                for dy in (dy0, dy1)
+            ))
+            radial_scale = q_position / forward_speed
+            if d_max <= goal_radius:
+                rgx0 = rgx1 = rgy0 = rgy1 = 0.0
+            else:
+                rgx0, rgx1 = interval_product(dx0, dx1, d_min, d_max)
+                rgy0, rgy1 = interval_product(dy0, dy1, d_min, d_max)
+                rgx0, rgx1 = radial_scale * rgx0, radial_scale * rgx1
+                rgy0, rgy1 = radial_scale * rgy0, radial_scale * rgy1
+                if d_min < goal_radius:
+                    rgx0, rgx1 = min(rgx0, 0.0), max(rgx1, 0.0)
+                    rgy0, rgy1 = min(rgy0, 0.0), max(rgy1, 0.0)
+            residual_grad_bounds = [tuple(bounds) for bounds in grad_bounds]
+            radial_grad_bounds = [(rgx0, rgx1), (rgy0, rgy1), (0.0, 0.0)]
+            grad_bounds[0] = (
+                grad_bounds[0][0] + rgx0,
+                grad_bounds[0][1] + rgx1,
+            )
+            grad_bounds[1] = (
+                grad_bounds[1][0] + rgy0,
+                grad_bounds[1][1] + rgy1,
+            )
+
+            cos0, cos1 = trig_interval(np.cos, float(sub_lo[2]), float(sub_hi[2]))
+            sin0, sin1 = trig_interval(np.sin, float(sub_lo[2]), float(sub_hi[2]))
+            gx0, gx1 = grad_bounds[0]
+            gy0, gy1 = grad_bounds[1]
+            gp0, gp1 = grad_bounds[2]
+
+            dx_cost = 0.0 if xlo <= goal[0] <= xhi else min(
+                abs(goal[0] - xlo), abs(goal[0] - xhi)
+            )
+            dy_cost = 0.0 if ylo <= goal[1] <= yhi else min(
+                abs(goal[1] - ylo), abs(goal[1] - yhi)
+            )
+            position_cost_lower = q_position * (
+                dx_cost * dx_cost + dy_cost * dy_cost
+            )
+            x_transport_lower = forward_speed * product_lower(
+                gx0, gx1, cos0, cos1
+            )
+            y_transport_lower = forward_speed * product_lower(
+                gy0, gy1, sin0, sin1
+            )
+            position_transport_lower = x_transport_lower + y_transport_lower
+
+            u_candidates = [
+                control_min,
+                control_max,
+                float(np.clip(0.0, control_min, control_max)),
+                float(np.clip(-gp0 / (2.0 * r_control), control_min, control_max)),
+                float(np.clip(-gp1 / (2.0 * r_control), control_min, control_max)),
+            ]
+            control_lower = np.inf
+            for uu in u_candidates:
+                gphi = gp0 if uu >= 0.0 else gp1
+                control_lower = min(
+                    control_lower, r_control * uu * uu + gphi * uu
+                )
+
+            total_lower = float(
+                position_cost_lower + x_transport_lower
+                + y_transport_lower + control_lower
+            )
+            subcell_reports.append(
+                {
+                    "subcell_index": [int(i) for i in sub_index],
+                    "subcell_bounds": {
+                        "lower": [float(v) for v in sub_lo],
+                        "upper": [float(v) for v in sub_hi],
+                    },
+                    "position_cost_lower": float(position_cost_lower),
+                    "x_transport_lower": float(x_transport_lower),
+                    "y_transport_lower": float(y_transport_lower),
+                    "position_transport_lower": float(position_transport_lower),
+                    "control_lower": float(control_lower),
+                    "total_lower": total_lower,
+                    "residual_gradient_intervals": [
+                        [float(lo), float(hi)]
+                        for lo, hi in residual_grad_bounds
+                    ],
+                    "radial_gradient_intervals": [
+                        [float(lo), float(hi)]
+                        for lo, hi in radial_grad_bounds
+                    ],
+                    "total_gradient_intervals": [
+                        [float(lo), float(hi)]
+                        for lo, hi in grad_bounds
+                    ],
+                    "heading_interval": [float(sub_lo[2]), float(sub_hi[2])],
+                    "cos_interval": [float(cos0), float(cos1)],
+                    "sin_interval": [float(sin0), float(sin1)],
+                }
+            )
+
+        # The parent-cell infimum is the minimum over its subcells. Taking
+        # the minimum of conservative subcell lower bounds is conservative
+        # for the entire parent cell and tightens interval dependencies.
+        worst_subcell = min(
+            subcell_reports, key=lambda report: float(report["total_lower"])
+        )
+        if return_components:
+            return {
+                "subdivisions_per_axis": (
+                    subdivisions_per_axis[0]
+                    if len(set(subdivisions_per_axis)) == 1
+                    else list(subdivisions_per_axis)
+                ),
+                "subcell_count": len(subcell_reports),
+                "worst_subcell_index": worst_subcell["subcell_index"],
+                "worst_subcell_bounds": worst_subcell["subcell_bounds"],
+                "position_cost_lower": worst_subcell["position_cost_lower"],
+                "x_transport_lower": worst_subcell["x_transport_lower"],
+                "y_transport_lower": worst_subcell["y_transport_lower"],
+                "position_transport_lower": worst_subcell["position_transport_lower"],
+                "control_lower": worst_subcell["control_lower"],
+                "total_lower": worst_subcell["total_lower"],
+                "residual_gradient_intervals": worst_subcell["residual_gradient_intervals"],
+                "radial_gradient_intervals": worst_subcell["radial_gradient_intervals"],
+                "total_gradient_intervals": worst_subcell["total_gradient_intervals"],
+                "heading_interval": worst_subcell["heading_interval"],
+                "cos_interval": worst_subcell["cos_interval"],
+                "sin_interval": worst_subcell["sin_interval"],
+            }
+        return float(worst_subcell["total_lower"])
+
+    def cell_slack_lower_bound(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        return float(
+            cell_slack_lower_bound_impl(values, grid, cell, subdivisions=1)
+        )
+
+    def cell_slack_lower_bound_refined(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        return float(
+            cell_slack_lower_bound_impl(values, grid, cell, subdivisions=2)
+        )
+
+    def cell_slack_lower_bound_deep(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> float:
+        # The default (4, 4, 2) spends more subdivisions spatially because
+        # dV/dphi varies with x/y inside the trilinear cell. The configurable
+        # shape supports controlled deeper-refinement experiments.
+        return float(
+            cell_slack_lower_bound_impl(
+                values, grid, cell, subdivisions=deep_subdivisions
+            )
+        )
+
+    def cell_slack_diagnostics(
+        values: Array, grid: RegularGrid, cell: tuple[int, int, int]
+    ) -> dict[str, object]:
+        coarse = cell_slack_lower_bound_impl(
+            values, grid, cell, subdivisions=1, return_components=True
+        )
+        refined = cell_slack_lower_bound_impl(
+            values, grid, cell, subdivisions=2, return_components=True
+        )
+        deep = cell_slack_lower_bound_impl(
+            values, grid, cell,
+            subdivisions=deep_subdivisions,
+            return_components=True,
+        )
+        assert (
+            isinstance(coarse, dict)
+            and isinstance(refined, dict)
+            and isinstance(deep, dict)
+        )
+        return {
+            "coarse": coarse,
+            "refined": refined,
+            "deep": deep,
+            "refinement_gain": float(
+                refined["total_lower"] - coarse["total_lower"]
+            ),
+            "deep_refinement_gain": float(
+                deep["total_lower"] - refined["total_lower"]
+            ),
+        }
+
+    return FOMCertificateProblem(
+        dynamics=dynamics,
+        running_cost=running_cost,
+        terminal_cost=terminal_cost,
+        admissible=admissible,
+        terminal_set=terminal_set,
+        controls=controls,
+        dt=dt,
+        initial_lower_bound=terminal_cost,
+        initial_lower_bound_is_subsolution=True,
+        global_value_lower_bound=0.0,
+        running_cost_lower_bound=0.0,
+        terminal_cost_lipschitz=None,
+        terminal_cell_intersects=terminal_cell_intersects,
+        terminal_cell_lower_bound=terminal_cell_lower_bound,
+        cell_is_fully_inadmissible=cell_is_fully_inadmissible,
+        outside_domain_lower_bound=terminal_cost,
+        outside_domain_is_subsolution=True,
+        control_lipschitz_bound=control_lipschitz_bound,
+        cell_slack_lower_bound=cell_slack_lower_bound,
+        cell_slack_lower_bound_refined=cell_slack_lower_bound_refined,
+        cell_slack_lower_bound_deep=cell_slack_lower_bound_deep,
+        cell_slack_diagnostics=cell_slack_diagnostics,
+    )
+
+
+__all__ = [
+    "CertificateReport",
+    "FOMCertificateProblem",
+    "RegularGrid",
+    "SemiLagrangianFOMCertificate",
+    "make_paper_unicycle_problem",
+    "radial_terminal_cost",
+]

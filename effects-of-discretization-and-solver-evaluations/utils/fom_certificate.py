@@ -1451,6 +1451,85 @@ def radial_terminal_cost(
     return q_position * exterior_cube / (3.0 * forward_speed)
 
 
+def _heading_transport_interval_lower_bound(
+    gx0: float,
+    gx1: float,
+    gy0: float,
+    gy1: float,
+    phi_lo: float,
+    phi_hi: float,
+    speed: float = 1.0,
+) -> float:
+    """Lower-bound min_phi,gx,gy speed * (gx*cos(phi) + gy*sin(phi)).
+
+    The gradient components range independently over their certified
+    intervals, but cosine and sine retain their common heading argument.
+    Splitting at their sign changes makes the active gradient endpoints
+    constant on each segment. On a segment, A*cos(phi)+B*sin(phi) has its
+    minimum at an endpoint or a stationary point atan2(B, A) + k*pi.
+    """
+    inputs = np.asarray(
+        [gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed], dtype=float
+    )
+    if np.any(~np.isfinite(inputs)):
+        raise ValueError("heading-extremum inputs must be finite")
+    if gx0 > gx1 or gy0 > gy1:
+        raise ValueError("gradient interval lower endpoints must not exceed upper endpoints")
+    if phi_lo > phi_hi:
+        raise ValueError("phi_lo must not exceed phi_hi")
+    if speed <= 0.0:
+        raise ValueError("speed must be positive")
+
+    breakpoints = {float(phi_lo), float(phi_hi)}
+    for offset in (0.0, np.pi / 2.0):
+        k0 = int(np.ceil((phi_lo - offset) / np.pi))
+        k1 = int(np.floor((phi_hi - offset) / np.pi))
+        for k in range(k0, k1 + 1):
+            angle = float(offset + k * np.pi)
+            if phi_lo < angle < phi_hi:
+                breakpoints.add(angle)
+
+    points = sorted(breakpoints)
+    segments = (
+        list(zip(points[:-1], points[1:]))
+        if len(points) > 1
+        else [(float(phi_lo), float(phi_hi))]
+    )
+    best = np.inf
+    for left, right in segments:
+        midpoint = left + 0.5 * (right - left)
+        cos_mid = float(np.cos(midpoint))
+        sin_mid = float(np.sin(midpoint))
+        a = gx0 if cos_mid >= 0.0 else gx1
+        b = gy0 if sin_mid >= 0.0 else gy1
+
+        candidates = [left, right]
+        stationary_base = float(np.arctan2(b, a))
+        k0 = int(np.ceil((left - stationary_base) / np.pi))
+        k1 = int(np.floor((right - stationary_base) / np.pi))
+        candidates.extend(
+            stationary_base + k * np.pi for k in range(k0, k1 + 1)
+        )
+        for angle in candidates:
+            value = a * float(np.cos(angle)) + b * float(np.sin(angle))
+            best = min(best, value)
+
+    scaled = speed * float(best)
+    magnitude = max(
+        1.0,
+        abs(scaled),
+        speed * max(abs(gx0), abs(gx1), abs(gy0), abs(gy1)),
+    )
+    # Bias the floating-point result down by a small scale-aware margin.
+    # This is numerical protection, not a substitute for the interval proof.
+    return float(
+        np.nextafter(
+            scaled - 64.0 * np.finfo(float).eps * magnitude,
+            -np.inf,
+        )
+    )
+
+
 def make_paper_unicycle_problem(
     *,
     goal: Sequence[float],
@@ -1465,6 +1544,7 @@ def make_paper_unicycle_problem(
     n_controls: int = 21,
     deep_refinement_subdivisions: Sequence[int] = (4, 4, 2),
     joint_extremum_enclosure: bool = False,
+    heading_extremum_enclosure: bool = False,
 ) -> FOMCertificateProblem:
     """Construct the Section V-A constant-speed unicycle problem.
 
@@ -1501,6 +1581,8 @@ def make_paper_unicycle_problem(
     deep_subdivisions = tuple(int(value) for value in raw_deep_subdivisions)
     if not isinstance(joint_extremum_enclosure, bool):
         raise ValueError("joint_extremum_enclosure must be a bool")
+    if not isinstance(heading_extremum_enclosure, bool):
+        raise ValueError("heading_extremum_enclosure must be a bool")
 
     controls = np.linspace(
         control_min, control_max, n_controls, dtype=float
@@ -1789,6 +1871,18 @@ def make_paper_unicycle_problem(
                 position_cost_lower + x_transport_lower
                 + y_transport_lower + control_lower
             )
+            heading_transport_lower = None
+            heading_total_lower = None
+            if heading_extremum_enclosure:
+                heading_transport_lower = _heading_transport_interval_lower_bound(
+                    gx0, gx1, gy0, gy1,
+                    float(sub_lo[2]), float(sub_hi[2]),
+                    speed=forward_speed,
+                )
+                heading_total_lower = float(
+                    position_cost_lower + heading_transport_lower + control_lower
+                )
+
             joint_total_lower = separable_total_lower
             joint_transport_center = None
             joint_transport_radius = None
@@ -1878,16 +1972,26 @@ def make_paper_unicycle_problem(
                     - joint_control_radius
                 )
 
-            # Both candidates are independently conservative lower bounds.
-            # Their maximum remains conservative and can never weaken the
-            # established separable enclosure.
-            total_lower = max(separable_total_lower, joint_total_lower)
-            selected_bound_method = (
-                "joint"
-                if joint_extremum_enclosure
+            # Each candidate is a conservative lower bound on the same
+            # subcell infimum. Their maximum cannot weaken the certificate.
+            total_candidates = [separable_total_lower, joint_total_lower]
+            if heading_total_lower is not None:
+                total_candidates.append(heading_total_lower)
+            total_lower = float(max(total_candidates))
+            if (
+                heading_total_lower is not None
+                and heading_total_lower > max(
+                    separable_total_lower, joint_total_lower
+                )
+            ):
+                selected_bound_method = "heading_extremum"
+            elif (
+                joint_extremum_enclosure
                 and joint_total_lower > separable_total_lower
-                else "separable"
-            )
+            ):
+                selected_bound_method = "joint"
+            else:
+                selected_bound_method = "separable"
             subcell_reports.append(
                 {
                     "subcell_index": [int(i) for i in sub_index],
@@ -1901,6 +2005,9 @@ def make_paper_unicycle_problem(
                     "position_transport_lower": float(position_transport_lower),
                     "control_lower": float(control_lower),
                     "separable_total_lower": separable_total_lower,
+                    "heading_extremum_enclosure_enabled": heading_extremum_enclosure,
+                    "heading_transport_lower": heading_transport_lower,
+                    "heading_total_lower": heading_total_lower,
                     "joint_extremum_enclosure_enabled": joint_extremum_enclosure,
                     "joint_total_lower": (
                         float(joint_total_lower) if joint_extremum_enclosure else None
@@ -1943,6 +2050,10 @@ def make_paper_unicycle_problem(
             min(float(report["joint_total_lower"]) for report in subcell_reports)
             if joint_extremum_enclosure else None
         )
+        heading_cell_lower_bound = (
+            min(float(report["heading_total_lower"]) for report in subcell_reports)
+            if heading_extremum_enclosure else None
+        )
         selected_cell_lower_bound = float(worst_subcell["total_lower"])
         if return_components:
             return {
@@ -1954,6 +2065,11 @@ def make_paper_unicycle_problem(
                 "subcell_count": len(subcell_reports),
                 "separable_cell_lower_bound": separable_cell_lower_bound,
                 "joint_cell_lower_bound": joint_cell_lower_bound,
+                "heading_cell_lower_bound": heading_cell_lower_bound,
+                "heading_cell_gain_over_separable": (
+                    heading_cell_lower_bound - separable_cell_lower_bound
+                    if heading_cell_lower_bound is not None else None
+                ),
                 "selected_cell_lower_bound": selected_cell_lower_bound,
                 "joint_cell_gain_over_separable": (
                     selected_cell_lower_bound - separable_cell_lower_bound
@@ -1966,6 +2082,11 @@ def make_paper_unicycle_problem(
                 "position_transport_lower": worst_subcell["position_transport_lower"],
                 "control_lower": worst_subcell["control_lower"],
                 "separable_total_lower": worst_subcell["separable_total_lower"],
+                "heading_extremum_enclosure_enabled": (
+                    worst_subcell["heading_extremum_enclosure_enabled"]
+                ),
+                "heading_transport_lower": worst_subcell["heading_transport_lower"],
+                "heading_total_lower": worst_subcell["heading_total_lower"],
                 "joint_extremum_enclosure_enabled": (
                     worst_subcell["joint_extremum_enclosure_enabled"]
                 ),

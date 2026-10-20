@@ -1806,25 +1806,16 @@ def make_paper_unicycle_problem(
                 for axis in range(3):
                     other_axes = [a for a in range(3) if a != axis]
                     derivative = 0.0
-                    for endpoint_bits in product((0, 1), repeat=2):
-                        other_t = [
-                            center_frac[a]
-                            for a in other_axes
-                        ]
+                    for other_bits in product((0, 1), repeat=2):
+                        idx0 = [0, 0, 0]
+                        idx1 = [0, 0, 0]
                         weight = 1.0
-                        for t in other_t:
-                            weight *= t if endpoint_bits[other_t.index(t)] else 1.0 - t
-                        # The explicit corner sum below avoids relying on
-                        # endpoint-only extrema for the center gradient.
-                        del weight
-                    for corner_bits in product((0, 1), repeat=3):
-                        weight = 1.0
-                        for a, bit in enumerate(corner_bits):
-                            if a != axis:
-                                t = center_frac[a]
-                                weight *= t if bit else 1.0 - t
-                        idx0 = list(corner_bits)
-                        idx1 = list(corner_bits)
+                        for j, other_axis in enumerate(other_axes):
+                            bit = other_bits[j]
+                            idx0[other_axis] = bit
+                            idx1[other_axis] = bit
+                            t = center_frac[other_axis]
+                            weight *= t if bit else 1.0 - t
                         idx0[axis] = 0
                         idx1[axis] = 1
                         derivative += weight * (

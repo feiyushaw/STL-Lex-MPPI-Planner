@@ -201,11 +201,13 @@ def main() -> None:
             prefix_query_scalar_seconds = None
             prefix_query_batch_seconds = None
             prefix_query_speedup = None
+        diagnostic_started = time.perf_counter()
         worst_cell_neighborhood = (
             certificate.cell_slack_neighborhood(radius=1)
             if report.epsilon_worst_cell is not None
             else []
         )
+        certificate_diagnostic_seconds = time.perf_counter() - diagnostic_started
         obstacle_extension_mode = (
             "nearest_admissible_residual"
             if certificate._domain_baseline_nodes is not None
@@ -250,6 +252,7 @@ def main() -> None:
                 "obstacle_extension_blocked_nodes": int(np.count_nonzero(blocked_mask)),
                 "obstacle_extension_residual_abs_max": obstacle_extension_residual_abs_max,
                 "certificate_build_seconds": certificate_build_seconds,
+                "certificate_diagnostic_seconds": certificate_diagnostic_seconds,
                 "igo_solve_seconds": igo_solve_seconds,
                 "completed_rollouts": solver.evaluated_rollouts_total,
                 "prefix_query_scalar_seconds": prefix_query_scalar_seconds,

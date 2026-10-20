@@ -183,12 +183,15 @@ violation.
 
 
 For the reported center/worst cell, the diagnostic payload decomposes the
-coarse, 2x2x2-refined, and 4x4x2-deep-refined lower bounds into position-cost,
-x-transport, y-transport, and control contributions. Each level records its
-worst subcell, physical bounds, and residual/radial/total gradient intervals.
-The summary separately records the worst cell refined at each level and whether
-either budget remains active. Diagnostics themselves do not change epsilon or
-select additional cells for refinement.
+coarse, 2x2x2-refined, and configured deep-refined lower bounds into
+position-cost, x-transport, y-transport, and control contributions. Each level
+records its subdivision shape, subcell count, worst subcell, physical bounds,
+and residual/radial/total gradient intervals. The summary separately records
+the worst cell refined at each level and whether either budget remains active.
+Diagnostics themselves do not change epsilon or select additional cells for
+refinement. The runner records diagnostic time separately from certificate
+build time so higher deep subdivision shapes do not silently inflate the
+reported build-time metric.
 
 ## Batched certificate queries
 

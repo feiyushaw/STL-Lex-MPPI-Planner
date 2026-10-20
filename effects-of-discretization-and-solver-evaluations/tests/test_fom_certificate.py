@@ -793,3 +793,98 @@ def test_prefix_pruning_never_uses_an_uncorrected_certificate():
     corrected = cert.corrected_lower_bound(state, 1.0)
     assert corrected <= raw + 1e-12
     assert cert.prefix_bound(3.0, state, 1.0) >= 3.0 + corrected - 1e-12
+
+
+def _reference_heading_transport_lower_bound(
+    gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=1.0
+):
+    """Independent reference: minimize over the four gradient-box corners."""
+    best = np.inf
+    for gx in (gx0, gx1):
+        for gy in (gy0, gy1):
+            angles = [phi_lo, phi_hi]
+            stationary_base = float(np.arctan2(gy, gx))
+            k0 = int(np.ceil((phi_lo - stationary_base) / np.pi))
+            k1 = int(np.floor((phi_hi - stationary_base) / np.pi))
+            angles.extend(
+                stationary_base + k * np.pi
+                for k in range(k0, k1 + 1)
+            )
+            best = min(
+                best,
+                *(
+                    gx * float(np.cos(phi)) + gy * float(np.sin(phi))
+                    for phi in angles
+                ),
+            )
+    return float(speed * best)
+
+
+def test_heading_extremum_matches_independent_corner_oracle_randomized():
+    rng = np.random.default_rng(20261020)
+    for _ in range(256):
+        gx0, gx1 = sorted(rng.uniform(-50.0, 50.0, size=2))
+        gy0, gy1 = sorted(rng.uniform(-50.0, 50.0, size=2))
+        phi_lo = float(rng.uniform(-4.0 * np.pi, 4.0 * np.pi))
+        phi_hi = phi_lo + float(rng.uniform(0.0, 2.0 * np.pi))
+        speed = float(np.exp(rng.uniform(np.log(0.1), np.log(5.0))))
+
+        actual = _heading_transport_interval_lower_bound(
+            gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=speed
+        )
+        reference = _reference_heading_transport_lower_bound(
+            gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=speed
+        )
+        scale = max(
+            1.0,
+            abs(reference),
+            speed * max(abs(gx0), abs(gx1), abs(gy0), abs(gy1)),
+        )
+        tolerance = 512.0 * np.finfo(float).eps * scale
+
+        # The production helper biases downward for floating-point safety.
+        # Its result should match the independent four-corner analytic oracle
+        # to roundoff and must not exceed the reference minimum.
+        assert actual <= reference + tolerance
+        assert reference - actual <= tolerance
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (1.0, -1.0, 0.0, 1.0, -0.5, 0.5, 1.0),
+        (0.0, 1.0, 2.0, -2.0, -0.5, 0.5, 1.0),
+        (0.0, 1.0, 0.0, 1.0, 0.5, -0.5, 1.0),
+        (0.0, 1.0, 0.0, 1.0, -0.5, 0.5, 0.0),
+        (0.0, 1.0, 0.0, 1.0, -0.5, 0.5, -1.0),
+        (0.0, 1.0, 0.0, 1.0, -0.5, 0.5, np.inf),
+    ],
+)
+def test_heading_extremum_rejects_invalid_interval_inputs(args):
+    with pytest.raises(ValueError):
+        _heading_transport_interval_lower_bound(*args)
+
+
+@pytest.mark.parametrize(
+    "gx0,gx1,gy0,gy1,phi_lo,phi_hi",
+    [
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        (-3.0, -1.0, 0.5, 2.0, -np.pi, np.pi),
+        (-1.0, 2.0, -2.0, 0.2, np.pi / 2.0 - 1e-12, np.pi / 2.0 + 1e-12),
+        (-1.0, 2.0, -2.0, 0.2, -1e-12, 1e-12),
+        (-1.0, 2.0, -2.0, 0.2, 4.0 * np.pi, 4.0 * np.pi),
+    ],
+)
+def test_heading_extremum_handles_degenerate_and_trigonometric_boundary_cases(
+    gx0, gx1, gy0, gy1, phi_lo, phi_hi
+):
+    actual = _heading_transport_interval_lower_bound(
+        gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=1.3
+    )
+    reference = _reference_heading_transport_lower_bound(
+        gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=1.3
+    )
+    scale = max(1.0, abs(reference), 1.3 * max(abs(gx0), abs(gx1), abs(gy0), abs(gy1)))
+    tolerance = 512.0 * np.finfo(float).eps * scale
+    assert actual <= reference + tolerance
+    assert reference - actual <= tolerance

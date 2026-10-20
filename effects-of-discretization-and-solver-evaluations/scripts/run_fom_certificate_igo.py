@@ -88,7 +88,15 @@ def main() -> None:
         "--certificate-deep-refinement-budget",
         type=int,
         default=8,
-        help="maximum already-refined cells to subdivide again at 4x4x4 resolution",
+        help="maximum already-refined cells to subdivide again",
+    )
+    parser.add_argument(
+        "--certificate-deep-refinement-subdivisions",
+        nargs=3,
+        type=int,
+        default=[4, 4, 2],
+        metavar=("NX", "NY", "NPHI"),
+        help="subcells per axis for the second-level HJB slack enclosure",
     )
     parser.add_argument("--n-samples", type=int, default=500)
     parser.add_argument("--n-iterations", type=int, default=20)
@@ -116,6 +124,10 @@ def main() -> None:
         parser.error("--certificate-refinement-budget must be non-negative")
     if args.certificate_deep_refinement_budget < 0:
         parser.error("--certificate-deep-refinement-budget must be non-negative")
+    if any(value < 1 for value in args.certificate_deep_refinement_subdivisions):
+        parser.error(
+            "--certificate-deep-refinement-subdivisions must contain three positive integers"
+        )
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +146,9 @@ def main() -> None:
             (-4.0, -2.5, 1.0, 3.5),
         ),
         n_controls=11,
+        deep_refinement_subdivisions=tuple(
+            args.certificate_deep_refinement_subdivisions
+        ),
     )
     grid = RegularGrid(
         lower=np.array([-5.0, -5.0, -np.pi]),
@@ -228,6 +243,9 @@ def main() -> None:
         rows.append(
             {
                 "certificate_iterations": capacity,
+                "certificate_deep_refinement_subdivisions": list(
+                    args.certificate_deep_refinement_subdivisions
+                ),
                 "obstacle_extension_mode": obstacle_extension_mode,
                 "obstacle_extension_blocked_nodes": int(np.count_nonzero(blocked_mask)),
                 "obstacle_extension_residual_abs_max": obstacle_extension_residual_abs_max,

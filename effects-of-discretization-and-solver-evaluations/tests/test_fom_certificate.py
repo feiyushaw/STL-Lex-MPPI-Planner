@@ -16,6 +16,7 @@ def make_small_certificate(
     obstacles=(),
     refinement_budget=256,
     deep_refinement_budget=8,
+    deep_refinement_subdivisions=(4, 4, 2),
 ):
     problem = make_paper_unicycle_problem(
         goal=(0.0, 0.0),
@@ -28,6 +29,7 @@ def make_small_certificate(
         dt=0.1,
         obstacles=obstacles,
         n_controls=9,
+        deep_refinement_subdivisions=deep_refinement_subdivisions,
     )
     grid = RegularGrid(
         lower=np.array([-2.0, -2.0, -np.pi]),
@@ -284,6 +286,55 @@ def test_deep_refinement_budget_is_separate_and_audited():
         assert cert._epsilon_final_cell_lowers[cell] >= (
             cert._epsilon_coarse_cell_lowers[cell] - 1e-9
         )
+
+
+def test_deep_refinement_shape_is_configurable_and_tightens_the_bound():
+    coarse_shape = make_small_certificate(
+        iterations=0, deep_refinement_subdivisions=(4, 4, 2)
+    )
+    deeper_shape = make_small_certificate(
+        iterations=0, deep_refinement_subdivisions=(8, 8, 2)
+    )
+    cell = (4, 4, 2)
+    values = coarse_shape.values[-1]
+    coarse_report = coarse_shape.problem.cell_slack_diagnostics(
+        values, coarse_shape.grid, cell
+    )
+    deeper_report = deeper_shape.problem.cell_slack_diagnostics(
+        values, deeper_shape.grid, cell
+    )
+
+    assert coarse_report["deep"]["subdivisions_per_axis"] == [4, 4, 2]
+    assert coarse_report["deep"]["subcell_count"] == 32
+    assert deeper_report["deep"]["subdivisions_per_axis"] == [8, 8, 2]
+    assert deeper_report["deep"]["subcell_count"] == 128
+    assert (
+        deeper_report["deep"]["total_lower"]
+        >= coarse_report["deep"]["total_lower"] - 1e-9
+    )
+    assert (
+        deeper_report["deep"]["total_lower"]
+        >= deeper_report["refined"]["total_lower"] - 1e-9
+    )
+
+
+def test_deep_refinement_shape_rejects_invalid_values():
+    base = dict(
+        goal=(0.0, 0.0),
+        goal_radius=0.5,
+        forward_speed=1.0,
+        q_position=1.0,
+        r_control=0.1,
+        control_min=-1.0,
+        control_max=1.0,
+        dt=0.1,
+        n_controls=9,
+    )
+    for invalid in ((0, 4, 2), (4, 0, 2), (4, 4, 0), (4, 2), (4, 4, 2, 1), (True, 4, 2)):
+        with pytest.raises(ValueError, match="deep_refinement_subdivisions"):
+            make_paper_unicycle_problem(
+                **base, deep_refinement_subdivisions=invalid
+            )
 
 
 def test_radial_extension_uses_nearest_residual_at_blocked_nodes():

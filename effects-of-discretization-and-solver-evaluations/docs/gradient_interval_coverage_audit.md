@@ -21,6 +21,14 @@ radial baseline at sampled subcell points.
 
 - The residual gradient is reconstructed from the eight parent-cell nodal
   residuals, independently of the production interval-bound loop.
+- For each tested subcell, the reported residual-gradient intervals are checked
+  against independently reconstructed values at all eight parent-cell corners.
+  Since each trilinear derivative is bilinear in the other two coordinates,
+  these corner values test the claimed exact extrema of the residual-gradient
+  enclosure (including periodic-heading index wrapping).
+- The radial-gradient interval is checked separately at every sampled point;
+  total-gradient containment alone could otherwise hide an overly narrow
+  component interval behind slack in the other component.
 - Samples include subcell interiors and faces for all 32 deep subcells in the
   configured `4 x 4 x 2` subdivision.
 - The total gradient is reconstructed as residual gradient plus the radial
@@ -53,8 +61,9 @@ gradient, and interval if a containment check fails.
 
 ## Interpretation and next gates
 
-Passing sampled coverage is necessary but not sufficient for a formal
-continuous-domain guarantee. The proof still needs to rely on the structure of
+Passing the parent-corner residual-extrema checks and sampled radial/total
+coverage is necessary but not sufficient for a formal continuous-domain
+guarantee. The proof still needs to rely on the structure of
 the trilinear derivative (bilinear in the other two coordinates, whose extrema
 over a rectangle occur at corners) and on the radial-gradient interval
 derivation. In particular, obstacle-admissibility boundaries and the radial

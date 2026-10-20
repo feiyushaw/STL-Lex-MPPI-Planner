@@ -153,16 +153,22 @@ every cell; unrefined cells retain their coarse bound. The first-level budget
 is configurable through `SemiLagrangianFOMCertificate(refinement_budget=...)`
 and `--certificate-refinement-budget`.
 
-A separate deep-refinement stage defaults to 8 cells. It sorts the first-level
-refined cells by their current violation and re-evaluates only the highest-impact
-cells using anisotropic 4x4x2 subcells. The control derivative dV/dphi of the
-trilinear residual varies with x/y inside a parent cell but not with phi; the
-4x4 spatial split therefore targets the dominant control-term interval, while
-the 2-way heading split also tightens trigonometric transport intervals. This
-uses 32 subcells per deep-refined cell rather than 64 for a uniform 4x4x4 split.
+A separate deep-refinement stage defaults to 8 cells and a subdivision shape
+of (4, 4, 2). It sorts the first-level refined cells by their current violation
+and re-evaluates only the highest-impact cells. The control derivative dV/dphi
+of the trilinear residual varies with x/y inside a parent cell but not with phi;
+the default 4x4 spatial split therefore targets the dominant control-term
+interval, while the 2-way heading split also tightens trigonometric transport
+intervals. This uses 32 subcells per deep-refined cell rather than 64 for a
+uniform 4x4x4 split. The shape is configurable through
+`deep_refinement_subdivisions=(NX, NY, NPHI)` or
+`--certificate-deep-refinement-subdivisions NX NY NPHI`; all three entries
+must be positive integers. The exact shape is recorded in each JSON result.
+This supports controlled comparisons such as (4, 4, 2), (8, 8, 2), and
+(8, 8, 4), without changing the first-level budget or the certificate gate.
 It targets a persistent local bottleneck such as the obstacle-corner cell
 `[4, 11, 3]` without multiplying the work across all 512 first-level cells.
-Configure it through
+Configure the cell count through
 `SemiLagrangianFOMCertificate(deep_refinement_budget=...)` or
 `--certificate-deep-refinement-budget`. Both budgets are independently
 audited. A higher first-level budget remains useful for reducing the worst
@@ -257,7 +263,22 @@ python scripts/run_fom_certificate_igo.py \
   --certificate-iterations 0 50 300 \
   --certificate-refinement-budget 512 \
   --certificate-deep-refinement-budget 8 \
-  --output outputs/fom_certificate_igo_budget512_deep8
+  --certificate-deep-refinement-subdivisions 4 4 2 \
+  --output outputs/fom_certificate_igo_budget512_deep_4x4x2
+
+python scripts/run_fom_certificate_igo.py \
+  --certificate-iterations 0 50 300 \
+  --certificate-refinement-budget 512 \
+  --certificate-deep-refinement-budget 8 \
+  --certificate-deep-refinement-subdivisions 8 8 2 \
+  --output outputs/fom_certificate_igo_budget512_deep_8x8x2
+
+python scripts/run_fom_certificate_igo.py \
+  --certificate-iterations 0 50 300 \
+  --certificate-refinement-budget 512 \
+  --certificate-deep-refinement-budget 8 \
+  --certificate-deep-refinement-subdivisions 8 8 4 \
+  --output outputs/fom_certificate_igo_budget512_deep_8x8x4
 ~~~
 
 Compare epsilon, the refined/unrefined/deep-refined worst violations, both

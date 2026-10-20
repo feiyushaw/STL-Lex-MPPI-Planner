@@ -9,6 +9,7 @@ from utils.fom_certificate import (
     SemiLagrangianFOMCertificate,
     make_paper_unicycle_problem,
     radial_terminal_cost,
+    _heading_transport_interval_lower_bound,
 )
 
 
@@ -19,6 +20,7 @@ def make_small_certificate(
     deep_refinement_budget=8,
     deep_refinement_subdivisions=(4, 4, 2),
     joint_extremum_enclosure=False,
+    heading_extremum_enclosure=False,
 ):
     problem = make_paper_unicycle_problem(
         goal=(0.0, 0.0),
@@ -33,6 +35,7 @@ def make_small_certificate(
         n_controls=9,
         deep_refinement_subdivisions=deep_refinement_subdivisions,
         joint_extremum_enclosure=joint_extremum_enclosure,
+        heading_extremum_enclosure=heading_extremum_enclosure,
     )
     grid = RegularGrid(
         lower=np.array([-2.0, -2.0, -np.pi]),
@@ -86,7 +89,9 @@ def test_joint_extremum_enclosure_is_opt_in_and_never_weakens_bounds():
 
 def test_joint_extremum_enclosure_is_below_dense_hamiltonian_samples():
     cert = make_small_certificate(
-        iterations=2, joint_extremum_enclosure=True
+        iterations=2,
+        joint_extremum_enclosure=True,
+        heading_extremum_enclosure=True,
     )
     cert.build()
     grid = cert.grid
@@ -141,6 +146,71 @@ def test_joint_extremum_enclosure_is_below_dense_hamiltonian_samples():
         sampled_slack.append(float(slack))
 
     assert lower <= min(sampled_slack) + 1e-9
+
+
+@pytest.mark.parametrize(
+    "gx0,gx1,gy0,gy1,phi_lo,phi_hi",
+    [
+        (-2.0, 1.0, -0.5, 2.5, -1.4, 1.7),
+        (-1.0, 2.0, -2.0, 0.2, 0.2, 1.2),
+        (-0.5, 1.5, -1.5, 0.8, -2.4, -0.3),
+        (-3.0, -1.0, 0.5, 2.0, 1.1, 2.1),
+        (0.2, 0.8, -1.1, 0.4, 0.3, 0.3),
+    ],
+)
+def test_analytic_heading_transport_enclosure_is_below_dense_box_samples(
+    gx0, gx1, gy0, gy1, phi_lo, phi_hi
+):
+    speed = 1.7
+    lower = _heading_transport_interval_lower_bound(
+        gx0, gx1, gy0, gy1, phi_lo, phi_hi, speed=speed
+    )
+    sampled = []
+    for phi in np.linspace(phi_lo, phi_hi, 20001):
+        c = float(np.cos(phi))
+        s = float(np.sin(phi))
+        gx_term = min(gx0 * c, gx1 * c)
+        gy_term = min(gy0 * s, gy1 * s)
+        sampled.append(speed * (gx_term + gy_term))
+    assert lower <= min(sampled) + 1e-9
+
+
+def test_heading_extremum_enclosure_is_opt_in_and_dominates_separable_bound():
+    separable = make_small_certificate(iterations=2)
+    heading = make_small_certificate(
+        iterations=2, heading_extremum_enclosure=True
+    )
+    separable_report = separable.build()
+    heading_report = heading.build()
+
+    assert heading_report.epsilon <= separable_report.epsilon + 1e-10
+    assert heading_report.epsilon_terminal == separable_report.epsilon_terminal
+    cell = (6, 4, 2)
+    diag = heading.problem.cell_slack_diagnostics(
+        heading.values[-1], heading.grid, cell
+    )["deep"]
+
+    assert not separable.problem.cell_slack_diagnostics(
+        separable.values[-1], separable.grid, cell
+    )["deep"]["heading_extremum_enclosure_enabled"]
+    assert diag["heading_extremum_enclosure_enabled"]
+    assert diag["heading_transport_lower"] is not None
+    assert diag["heading_total_lower"] is not None
+    assert (
+        diag["heading_transport_lower"]
+        >= diag["x_transport_lower"] + diag["y_transport_lower"] - 1e-9
+    )
+    assert diag["heading_cell_lower_bound"] is not None
+    assert (
+        diag["heading_cell_lower_bound"]
+        >= diag["separable_cell_lower_bound"] - 1e-9
+    )
+    assert diag["selected_cell_lower_bound"] >= (
+        diag["separable_cell_lower_bound"] - 1e-9
+    )
+    assert diag["selected_bound_method"] in {
+        "separable", "joint", "heading_extremum"
+    }
 
 
 def test_radial_warm_start_matches_closed_form():

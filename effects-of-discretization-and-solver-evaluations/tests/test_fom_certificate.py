@@ -969,9 +969,56 @@ def test_reported_gradient_intervals_cover_dense_subcell_samples(
             intervals = np.asarray(
                 subcell["total_gradient_intervals"], dtype=float
             )
-            assert intervals.shape == (3, 2)
-            assert np.all(np.isfinite(intervals))
-            assert np.all(intervals[:, 0] <= intervals[:, 1])
+            residual_intervals = np.asarray(
+                subcell["residual_gradient_intervals"], dtype=float
+            )
+            radial_intervals = np.asarray(
+                subcell["radial_gradient_intervals"], dtype=float
+            )
+            for name, bounds in (
+                ("total", intervals),
+                ("residual", residual_intervals),
+                ("radial", radial_intervals),
+            ):
+                assert bounds.shape == (3, 2), (name, bounds.shape)
+                assert np.all(np.isfinite(bounds)), (name, bounds)
+                assert np.all(bounds[:, 0] <= bounds[:, 1]), (name, bounds)
+
+            # The derivative of a trilinear interpolant is bilinear in the
+            # other two coordinates. Its exact extrema over the parent cell
+            # are attained at corners of those two coordinates. Reconstruct
+            # these independently and require the residual interval to enclose
+            # all eight corner evaluations for every gradient component.
+            parent_corner_gradients = np.asarray([
+                _coverage_audit_residual_gradient(
+                    residual, grid, cell, np.asarray(corner_frac, dtype=float)
+                )
+                for corner_frac in product((0.0, 1.0), repeat=3)
+            ])
+            assert parent_corner_gradients.shape == (8, 3)
+            exact_corner_min = np.min(parent_corner_gradients, axis=0)
+            exact_corner_max = np.max(parent_corner_gradients, axis=0)
+            interval_tolerance = 2e-10 * max(
+                1.0, float(np.max(np.abs(parent_corner_gradients)))
+            )
+            assert np.all(
+                residual_intervals[:, 0] <= exact_corner_min + interval_tolerance
+            ), (
+                f"residual lower interval misses parent-corner extrema: "
+                f"obstacles={obstacles}, cell={cell}, "
+                f"subcell={subcell['subcell_index']}, "
+                f"minimum={exact_corner_min.tolist()}, "
+                f"intervals={residual_intervals.tolist()}"
+            )
+            assert np.all(
+                residual_intervals[:, 1] >= exact_corner_max - interval_tolerance
+            ), (
+                f"residual upper interval misses parent-corner extrema: "
+                f"obstacles={obstacles}, cell={cell}, "
+                f"subcell={subcell['subcell_index']}, "
+                f"maximum={exact_corner_max.tolist()}, "
+                f"intervals={residual_intervals.tolist()}"
+            )
 
             # Include each subcell's interior and faces. Samples exactly on
             # the radial terminal-cost kink are skipped because its classical
@@ -991,6 +1038,24 @@ def test_reported_gradient_intervals_cover_dense_subcell_samples(
                 if distance > 0.5:
                     radial_gradient[:2] = distance * state[:2]
                 total_gradient = residual_gradient + radial_gradient
+
+                radial_scale = np.asarray(radial_intervals, dtype=float)
+                assert np.all(
+                    radial_gradient >= radial_scale[:, 0] - 2e-9
+                ), (
+                    f"radial lower interval missed sample: obstacles={obstacles}, "
+                    f"cell={cell}, subcell={subcell['subcell_index']}, "
+                    f"state={state.tolist()}, radial={radial_gradient.tolist()}, "
+                    f"intervals={radial_scale.tolist()}"
+                )
+                assert np.all(
+                    radial_gradient <= radial_scale[:, 1] + 2e-9
+                ), (
+                    f"radial upper interval missed sample: obstacles={obstacles}, "
+                    f"cell={cell}, subcell={subcell['subcell_index']}, "
+                    f"state={state.tolist()}, radial={radial_gradient.tolist()}, "
+                    f"intervals={radial_scale.tolist()}"
+                )
 
                 scale = max(1.0, float(np.max(np.abs(total_gradient))))
                 tolerance = 2e-9 * scale

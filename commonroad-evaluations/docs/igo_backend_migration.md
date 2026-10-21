@@ -12,7 +12,7 @@ The active optimizer reads `planner.igo`:
 - `initial_covariance` initializes each temporal block's covariance factor.
 - `sampling_method: pureRandom` generates Gaussian latent samples, matching the xNES sampling assumption. LHS variants are opt-in experiment modes.
 - `elite_quantile`, `block_steps`, `lr_mean`, and `lr_cov` configure block-xNES.
-- `reporting_effort_weight` affects only the reported effort diagnostic, never Lex-STL ranking.
+- `effort_tiebreak_weight` affects only the deterministic control-effort tie-break after the primary Lex-STL costs are equal; it does not change the primary lexicographic cost.
 - `enable_operational_limit_pruning` enables the narrow rulebook-prefix guard for operational limits.
 
 The old `planner.mppi` section is still parsed. If `planner.igo` is absent, its relevant values seed the new configuration, so existing YAML files continue to work. When `planner.igo` is present, its values take precedence; legacy MPPI temperature and sampling settings do not control the active IGO path.

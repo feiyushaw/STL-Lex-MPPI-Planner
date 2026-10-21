@@ -3,6 +3,7 @@
 #include <yaml-cpp/yaml.h>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <map>
 #include <vector>
 #include <tuple>

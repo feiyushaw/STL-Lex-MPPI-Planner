@@ -50,6 +50,13 @@ jobs:
           cd commonroad-evaluations
           /tmp/fom_igo_config_test
 
+      - name: Run Python FOM-IGO regression tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy pytest
+          cd effects-of-discretization-and-solver-evaluations
+          python -m pytest -q tests/test_fom_igo_solver.py tests/test_fom_certificate_igo.py
+
       - name: Syntax-check production IGO planner translation unit
         run: |
           g++ -std=c++17 -fopenmp -fsyntax-only \

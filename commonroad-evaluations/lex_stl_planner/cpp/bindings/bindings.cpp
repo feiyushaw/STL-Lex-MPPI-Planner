@@ -80,8 +80,7 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def_readwrite("lr_mean", &PlannerFOMIGOConfig::lr_mean)
         .def_readwrite("lr_cov", &PlannerFOMIGOConfig::lr_cov)
         .def_readwrite("enable_operational_limit_pruning", &PlannerFOMIGOConfig::enable_operational_limit_pruning)
-        .def_readwrite("effort_tiebreak_weight", &PlannerFOMIGOConfig::effort_tiebreak_weight)
-        .def_readwrite("reporting_effort_weight", &PlannerFOMIGOConfig::effort_tiebreak_weight); // Deprecated compatibility alias.
+        .def_readwrite("reporting_effort_weight", &PlannerFOMIGOConfig::reporting_effort_weight);
 
     py::class_<PlannerPreemptiveMPPIConfig>(m, "PlannerPreemptiveMPPIConfig")
         .def(py::init<>())

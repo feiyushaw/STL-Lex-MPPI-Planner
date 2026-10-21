@@ -22,7 +22,7 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
       n_samples_initial_(cfg.planner.igo.n_samples_initial),
       num_iterations_(cfg.planner.igo.num_iterations),
       initial_covariance_(cfg.planner.igo.initial_covariance),
-      effort_tiebreak_weight_(cfg.planner.igo.effort_tiebreak_weight),
+      reporting_effort_weight_(cfg.planner.igo.reporting_effort_weight),
       sample_count_decay_method_(cfg.planner.igo.sample_count_decay_method),
       n_samples_final_(cfg.planner.igo.n_samples_final),
       sampling_method_(cfg.planner.igo.sampling_method),
@@ -109,9 +109,9 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
     {
         throw std::invalid_argument("Unsupported FOM-IGO sampling_method: " + sampling_method_);
     }
-    if (!std::isfinite(effort_tiebreak_weight_) || effort_tiebreak_weight_ < 0.0)
+    if (!std::isfinite(reporting_effort_weight_) || reporting_effort_weight_ < 0.0)
     {
-        throw std::invalid_argument("IGO effort_tiebreak_weight must be finite and non-negative");
+        throw std::invalid_argument("IGO reporting_effort_weight must be finite and non-negative");
     }
 
     block_slices_ = FOMIGOBlockUpdater::buildBlockSlices(control_horizon_, block_steps_);
@@ -472,7 +472,7 @@ void MPPIPlanner::initializeCostFunction(const Config &cfg)
 double MPPIPlanner::calculateRemainingInputCost(const Eigen::MatrixXd &u) const
 {
     // Reporting-only effort term; it is not part of IGO ranking.
-    Eigen::MatrixXd R_ = effort_tiebreak_weight_ * initial_covariance_.inverse();
+    Eigen::MatrixXd R_ = reporting_effort_weight_ * initial_covariance_.inverse();
 
     double cost = 0.0;
     for (int k = 0; k < control_horizon_; ++k)

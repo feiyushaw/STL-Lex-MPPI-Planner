@@ -143,7 +143,7 @@ struct PlannerFOMIGOConfig
     double lr_mean = 1.0;
     double lr_cov = 0.25;
     bool enable_operational_limit_pruning = true;
-    double effort_tiebreak_weight = 1.0; // Applied only after primary Lex-STL costs tie.
+    double reporting_effort_weight = 1.0;
 };
 
 struct PlannerPreemptiveMPPIConfig
@@ -403,7 +403,7 @@ public:
         planner.igo.lr_mean = planner.mppi.igo.lr_mean;
         planner.igo.lr_cov = planner.mppi.igo.lr_cov;
         planner.igo.enable_operational_limit_pruning = planner.mppi.igo.enable_certificate_pruning;
-        planner.igo.effort_tiebreak_weight = 1.0;
+        planner.igo.reporting_effort_weight = 1.0;
 
         YAML::Node fom_igo_cfg = config["planner"]["igo"];
         if (fom_igo_cfg)
@@ -441,10 +441,8 @@ public:
                 planner.igo.enable_operational_limit_pruning = fom_igo_cfg["enable_operational_limit_pruning"].as<bool>();
             else if (fom_igo_cfg["enable_certificate_pruning"])
                 planner.igo.enable_operational_limit_pruning = fom_igo_cfg["enable_certificate_pruning"].as<bool>();
-            if (fom_igo_cfg["effort_tiebreak_weight"])
-                planner.igo.effort_tiebreak_weight = fom_igo_cfg["effort_tiebreak_weight"].as<double>();
-            else if (fom_igo_cfg["reporting_effort_weight"])
-                planner.igo.effort_tiebreak_weight = fom_igo_cfg["reporting_effort_weight"].as<double>();
+            if (fom_igo_cfg["reporting_effort_weight"])
+                planner.igo.reporting_effort_weight = fom_igo_cfg["reporting_effort_weight"].as<double>();
         }
 
         // Parse preemptive_mppi section (optional, defaults to MPPI parameters if not present)

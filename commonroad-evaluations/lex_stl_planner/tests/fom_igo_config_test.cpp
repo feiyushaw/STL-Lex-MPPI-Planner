@@ -41,7 +41,7 @@ int main()
         return 1;
     }
     if (std::abs(cfg.planner.igo.elite_quantile - 0.05) > 1e-12 ||
-        std::abs(cfg.planner.igo.effort_tiebreak_weight - 1.0) > 1e-12 ||
+        std::abs(cfg.planner.igo.reporting_effort_weight - 1.0) > 1e-12 ||
         cfg.planner.igo.block_steps != 5)
     {
         std::cerr << "Canonical IGO xNES settings were not parsed" << std::endl;

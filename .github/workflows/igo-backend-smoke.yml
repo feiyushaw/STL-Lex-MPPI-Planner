@@ -28,7 +28,7 @@ jobs:
       - name: Install lightweight C++ dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ libeigen3-dev libyaml-cpp-dev
+          sudo apt-get install -y g++ libeigen3-dev libyaml-cpp-dev libboost-dev
 
       - name: Build and run block-xNES regression
         run: |

@@ -178,7 +178,7 @@ std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> MPPIPlanner::forwar
             const double v_next = x(3, k + 1);
             if (v_next < v_min - 1e-4 || v_next > v_max + 1e-4 || delta_next < delta_min - 1e-4 || delta_next > delta_max + 1e-4)
             {
-                // Complete the state/output trajectory after the certificate
+                // Complete the state/output trajectory after the operational-limit decision
                 // decision so pruned samples remain structurally valid for
                 // visualization and diagnostics.
                 for (int rem_k = k + 1; rem_k < K_ - 1; ++rem_k)
@@ -258,7 +258,7 @@ PlannerResult MPPIPlanner::planImpl(const Eigen::MatrixXd &u_init)
     return PlannerResult{final_x, final_u, cost, continuous_costs, discrete_costs, remaining_input_cost, solve_time, trajectory_samples, best_overall_x, true};
 }
 
-// Perform a single FOM-IGO (block-xNES + certificate pruning) improvement step.
+// Perform a single FOM-IGO (block-xNES + operational-limit prefix guard) improvement step.
 std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint64_t> MPPIPlanner::igoStep(
     Eigen::MatrixXd control_input,
     int iteration,
@@ -602,7 +602,7 @@ void MPPIPlanner::printPlannerInfo() const
         total_samples += samples;
     }
 
-    std::cout << "\n=== FOM-IGO (Block-xNES + Certificate Pruning) Planner ===" << std::endl;
+    std::cout << "\n=== FOM-IGO (Block-xNES + Operational-Limit Prefix Guard) Planner ===" << std::endl;
     std::cout << "Iterations:       " << num_iterations_ << std::endl;
     std::cout << "Total samples:    " << total_samples << std::endl;
     std::cout << "Block steps:      " << block_steps_ << std::endl;

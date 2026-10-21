@@ -1,0 +1,4 @@
+method,runs,optimal_match_rate,zero_violation_rate,mean_relative_gap_pct,median_relative_gap_pct,mean_solve_time_sec,mean_rollout_effective_rate,mean_transition_effective_rate
+igo,60,0.95,0.1,0.0583505170661134,0.0,0.010945860544840496,1.0,1.0
+igo_pruning,60,0.95,0.1,0.0583505170661134,0.0,0.010894195238749186,1.0,1.0
+legacy_mppi,60,0.7166666666666667,0.08333333333333333,2.2312677445772953,0.0,0.42149158718724117,1.0,1.0

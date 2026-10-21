@@ -80,11 +80,11 @@ requires CMake, a C++17 compiler, Eigen, yaml-cpp, pagmo, and pybind11. For
 example, on an Ubuntu container where apt packages are available:
 
 ~~~bash
-sudo apt-get update
-sudo apt-get install -y cmake g++ libeigen3-dev libyaml-cpp-dev libpagmo-dev
+apt-get update
+apt-get install -y cmake g++ libeigen3-dev libyaml-cpp-dev libpagmo-dev
 
 export PY=/opt/nuplan_env/bin/python
-"$PY" -m pip install pybind11 PyYAML
+"$PY" -m pip install --user pybind11 PyYAML
 
 cmake -S commonroad-evaluations \
   -B commonroad-evaluations/build-nuplan \
@@ -97,9 +97,12 @@ cmake --build commonroad-evaluations/build-nuplan \
   --target lex_stl_planner_bindings --parallel 2
 ~~~
 
-If the container lacks the pagmo development package or the Python-specific
-pybind11 CMake package, install them in the same container before building.
-Do not copy a shared library compiled for a different Python minor version.
+The STCP setup may mount /opt/nuplan_env read-only. The --user pip install above
+keeps Python-only build helpers in a writable user site; apt dependencies must be
+installed in the container image or a writable container layer. If the container
+lacks the pagmo development package or Python-specific pybind11 CMake package,
+install them before building. Do not copy a shared library compiled for a different
+Python minor version.
 
 ## 3. Run the first real-data smoke test
 

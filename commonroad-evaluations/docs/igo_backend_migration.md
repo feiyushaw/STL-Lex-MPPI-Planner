@@ -17,6 +17,23 @@ The active optimizer reads `planner.igo`:
 
 The old `planner.mppi` section is still parsed. If `planner.igo` is absent, its relevant values seed the new configuration, so existing YAML files continue to work. When `planner.igo` is present, its values take precedence; legacy MPPI temperature and sampling settings do not control the active IGO path.
 
+## xNES update contract
+
+For each iteration, the production optimizer samples latent vectors $s_i\sim\mathcal{N}(0,I)$ and forms bounded controls from $u_i=m+A s_i$. It ranks completed rollouts by the Lex-STL integer cost, using the effort diagnostic only as a deterministic tie-breaker, then retains the top `elite_quantile` fraction with equal normalized weights.
+
+For a temporal block $b$, the implementation computes
+
+```text
+g_m,b = sum_i w_i s_i,b
+G_b   = sum_i w_i (s_i,b s_i,b^T - I_b)
+m_b   <- m_b + lr_mean * A_b * g_m,b
+A_b   <- A_b * exp(0.5 * lr_cov * sym(G_b))
+```
+
+The latent vectors are the original Gaussian samples, not reconstructed from the clipped controls. Control projection changes the evaluated rollout but does not rewrite the whitened statistics. Block slices use half-open `[start, end)` semantics. The C++ regression checks the exact mean and covariance-factor update on a deterministic two-elite example.
+
+The paper's benchmark uses 10,000 rollouts per iteration and the top 5% elite set. The production defaults intentionally retain a smaller, configurable search budget for the CommonRoad planner; this is a deployment-budget adaptation, not a claim of reproducing the paper's benchmark settings.
+
 ## Certificate boundary
 
 The production C++ guard only stops a rollout when an operational-limit violation is guaranteed to lose against an incumbent that already satisfies the highest-priority operational-limit rule. It is not the independent semi-Lagrangian HJB certificate.

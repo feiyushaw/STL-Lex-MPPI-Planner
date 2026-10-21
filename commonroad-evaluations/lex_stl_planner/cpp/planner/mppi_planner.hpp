@@ -105,7 +105,7 @@ private:
     std::string sampling_method_;
     bool return_best_sample_;
 
-    // FOM-IGO Block-xNES & Certificate Pruning parameters
+    // FOM-IGO block-xNES and specialized operational-limit prefix pruning
     int block_steps_ = 5;
     double elite_quantile_ = 0.05;
     double lr_mean_ = 1.0;

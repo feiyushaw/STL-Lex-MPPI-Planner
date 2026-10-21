@@ -16,6 +16,8 @@ That HJB certificate is not enabled for arbitrary Lex-STL costs because its
 dynamics and Bolza objective must be proved compatible before its lower bound
 can safely prune those rollouts.
 
+See [the IGO backend migration contract](commonroad-evaluations/docs/igo_backend_migration.md) for the canonical config, compatibility fallback, and Ubuntu validation commands.
+
 Code to reproduce the numerical experiments from:
 
 Patrick Halder, Lothar Kiltz, Hannes Homburger, Johannes Reuter, Matthias Althoff,

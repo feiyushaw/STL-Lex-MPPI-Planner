@@ -63,6 +63,19 @@ if(BUILD_FOM_IGO_TESTS)
     )
     target_link_libraries(fom_igo_block_updater_test PRIVATE Eigen3::Eigen)
     add_test(NAME fom_igo_block_updater_test COMMAND fom_igo_block_updater_test)
+
+    # Exercise YAML parsing of the canonical planner.igo section and ensure
+    # legacy MPPI sampling settings do not leak into the active IGO backend.
+    add_executable(fom_igo_config_test
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/tests/fom_igo_config_test.cpp
+    )
+    target_include_directories(fom_igo_config_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/cpp/config
+        ${EIGEN3_INCLUDE_DIR}
+    )
+    target_link_libraries(fom_igo_config_test PRIVATE Eigen3::Eigen yaml-cpp)
+    add_test(NAME fom_igo_config_test COMMAND fom_igo_config_test)
+    set_tests_properties(fom_igo_config_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 # Add external dependencies

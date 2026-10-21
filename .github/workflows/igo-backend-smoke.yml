@@ -1,9 +1,6 @@
 name: IGO backend smoke
 
 on:
-  push:
-    branches:
-      - feat/replace-mppi-with-fom-igo
   pull_request:
     branches:
       - igo

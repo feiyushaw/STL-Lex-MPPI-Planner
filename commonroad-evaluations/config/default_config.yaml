@@ -7,6 +7,26 @@ planner:
         time_horizon: 15 #[steps]
         dt: 0.2 #[s]
 
+    # Canonical production optimizer: FOM-IGO / block-xNES.
+    # Gaussian latent sampling is the default assumed by the xNES update.
+    igo:
+        num_iterations: 20
+        n_samples_initial: 1000
+        initial_covariance: [[0.1, 0.0], [0.0, 6.0]]
+        sample_count_decay_method: "cosine"
+        n_samples_final: 100
+        sampling_method: "pureRandom"
+        seed: 123
+        return_best_sample: True
+        elite_quantile: 0.05
+        block_steps: 5
+        lr_mean: 1.0
+        lr_cov: 0.25
+        enable_operational_limit_pruning: True
+        reporting_effort_weight: 1.0
+
+    # Legacy MPPI parameter section retained for compatibility and the
+    # independent preemptive-MPPI planner; it no longer configures IGO.
     mppi:
         n_samples_initial: 1000 # Initial number of samples M_init
         num_iterations: 20 # Number of iterations J
@@ -27,7 +47,7 @@ planner:
             block_steps: 5
             lr_mean: 1.0
             lr_cov: 0.25
-            enable_certificate_pruning: True
+            enable_certificate_pruning: True # Legacy alias for operational-limit prefix pruning; not the HJB certificate
 
     preemptive_mppi:
         n_samples_initial: 1000 # Initial number of samples M_init

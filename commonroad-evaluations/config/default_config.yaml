@@ -23,7 +23,7 @@ planner:
         lr_mean: 1.0
         lr_cov: 0.25
         enable_operational_limit_pruning: True
-        reporting_effort_weight: 1.0
+        effort_tiebreak_weight: 1.0
 
     # Legacy MPPI parameter section retained for compatibility and the
     # independent preemptive-MPPI planner; it no longer configures IGO.

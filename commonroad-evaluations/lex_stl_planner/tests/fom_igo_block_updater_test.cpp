@@ -18,6 +18,13 @@ int main()
         }
     };
 
+    require(isSupportedFOMIGOSamplingMethod("pureRandom"),
+            "iid Gaussian latent sampling should be supported");
+    require(isSupportedFOMIGOSamplingMethod("randomLHS"),
+            "LHS should remain available as an opt-in comparison mode");
+    require(!isSupportedFOMIGOSamplingMethod("mppi"),
+            "unknown sampling policies must be rejected");
+
     const auto slices = FOMIGOBlockUpdater::buildBlockSlices(7, 3);
     require(slices.size() == 3, "three temporal blocks expected");
     require(slices[0] == std::make_pair(0, 3), "first block mismatch");

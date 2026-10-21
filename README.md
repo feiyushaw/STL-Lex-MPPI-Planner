@@ -18,6 +18,8 @@ can safely prune those rollouts.
 
 See [the IGO backend migration contract](commonroad-evaluations/docs/igo_backend_migration.md) for the canonical config, compatibility fallback, and Ubuntu validation commands.
 
+The reported input-effort diagnostic has a separate `reporting_effort_weight`; it does not enter selection. The primary ranking is the Lex-STL integer cost, with a fixed small control-norm term used only when primary costs tie.
+
 Code to reproduce the numerical experiments from:
 
 Patrick Halder, Lothar Kiltz, Hannes Homburger, Johannes Reuter, Matthias Althoff,

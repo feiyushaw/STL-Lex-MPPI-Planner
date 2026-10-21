@@ -19,6 +19,8 @@ from lexstl_nuplan.canonical import (
     parse_frame,
 )
 
+from run_nuplan_canonical import _write_effective_config
+
 
 def make_frame(
     *,
@@ -110,6 +112,32 @@ class CanonicalAdapterTests(unittest.TestCase):
         self.assertEqual(first[0][0], second[0][0])
         self.assertEqual(first[0][5], 0.0)
         self.assertEqual(first[0][8], 0.0)
+
+    def test_effective_config_filters_missing_semantics_and_preserves_horizon(self) -> None:
+        source_config = (
+            Path(__file__).resolve().parents[2]
+            / "commonroad-evaluations"
+            / "config"
+            / "default_config.yaml"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "effective_config.yaml"
+            config, active, disabled, requested_horizon_s, steps = _write_effective_config(
+                source_config, output, 0.5, False, False
+            )
+            self.assertAlmostEqual(config["planner"]["general"]["dt"], 0.5)
+            self.assertAlmostEqual(requested_horizon_s, 3.0)
+            self.assertEqual(steps, 6)
+            self.assertTrue(disabled)
+            self.assertTrue(all(rule not in active for rule in (
+                "EMERGENCY_VEHICLE", "PRIORITY", "SPEED_LIMITS",
+                "STOP_AT_STOP_SIGN", "SERVE_BUS_STOP",
+            )))
+            import yaml
+            round_tripped = yaml.safe_load(output.read_text(encoding="utf-8"))
+            self.assertEqual(round_tripped["planner"]["general"]["time_horizon"], 6)
+            with self.assertRaisesRegex(ValueError, "Canonical JSONL v1"):
+                _write_effective_config(source_config, output, 0.5, False, True)
 
     def test_ego_state_uses_rear_axle_contract_and_zero_steering_fallback(self) -> None:
         frame = parse_frame(make_frame(), 1)

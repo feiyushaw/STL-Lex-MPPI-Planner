@@ -52,7 +52,14 @@ int main()
         1.0,
         0.25);
 
-    require(mean(0, 0) < 0.0, "elite samples should move the mean");
+    require(std::abs(mean(0, 0) + 1.5) < 1e-12,
+            "mean update must use only the two selected whitened elite samples");
+    require(std::abs(mean(0, 1)) < 1e-12,
+            "zero-mean latent coordinate must not move the control mean");
+    require(std::abs(factors[0](0, 0) - std::exp(0.3125)) < 1e-12,
+            "xNES factor update must match A exp(lr_cov * G_M / 2)");
+    require(std::abs(factors[0](1, 1) - std::exp(-0.125)) < 1e-12,
+            "xNES covariance update must include the -I baseline term");
     require(factors[0].allFinite(), "first covariance factor is finite");
     require(factors[1].allFinite(), "second covariance factor is finite");
     require(std::abs(factors[0].determinant()) > 0.0, "first covariance factor remains nonsingular");

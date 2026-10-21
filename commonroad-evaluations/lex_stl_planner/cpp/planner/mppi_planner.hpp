@@ -59,7 +59,7 @@ private:
         std::vector<Eigen::MatrixXd> &A_blocks,
         uint64_t incumbent_best_cost);
 
-    std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> forwardRolloutWithCertificatePruning(
+    std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> forwardRolloutWithOperationalLimitPruning(
         const Eigen::MatrixXd &control_input,
         uint64_t incumbent_best_cost) const;
 
@@ -96,13 +96,10 @@ private:
     int num_iterations_;
     int max_threads_;
 
-    // Legacy MPPI configuration retained for compatibility; beta/lambda
-    // are not used by the IGO optimizer.
+    // Active IGO configuration. The covariance factor A is evolved by xNES;
+    // no MPPI temperature or beta schedule participates in the optimizer.
     Eigen::MatrixXd initial_covariance_;
-    double initial_lambda_;
-    double gamma_;
-    std::string beta_decay_method_;
-    double beta_min_;
+    double reporting_effort_weight_;
     std::string sample_count_decay_method_;
     int n_samples_final_;
     std::string sampling_method_;
@@ -113,7 +110,7 @@ private:
     double elite_quantile_ = 0.05;
     double lr_mean_ = 1.0;
     double lr_cov_ = 0.25;
-    bool enable_certificate_pruning_ = true;
+    bool enable_operational_limit_pruning_ = true;
     std::vector<std::pair<int, int>> block_slices_;
     uint64_t op_limits_weight_ = 0;
 

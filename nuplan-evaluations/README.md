@@ -41,19 +41,23 @@ not something this adapter claims to have completed.
 ## 1. Export nuPlan anchors with STCP
 
 Run this in the STCP repository inside the existing nuPlan Docker environment.
-Adjust mount paths to match the local Ubuntu host.
+Adjust mount paths to match the local Ubuntu host. For one-container testing,
+mount this planner repository alongside STCP (for example, at /workspace/lexstl)
+and keep STCP mounted at /workspace/stcp. Run the exporter from /workspace/stcp,
+then build and run the planner from /workspace/lexstl. Keep the generated JSONL
+under the mounted STCP directory so it survives a docker run --rm container exit.
 
 ~~~bash
 export DATA_ROOT=/data/datasets/AD_Datasets/nuPlan_mini/nuplan-v1.1_mini
 export MAP_ROOT=/data/datasets/AD_Datasets/nuPlan_mini/maps
 export PYTHON_BIN=/opt/nuplan_env/bin/python
 
-mkdir -p /tmp/lexstl_nuplan
+mkdir -p /workspace/stcp/benchmark_runs/lexstl_nuplan
 "$PYTHON_BIN" adapters/nuplan/scenario_exporter.py \
   --data-root "$DATA_ROOT" \
   --map-root "$MAP_ROOT" \
-  --output /tmp/lexstl_nuplan/canonical.jsonl \
-  --sidecar-meta /tmp/lexstl_nuplan/sidecar_meta.json \
+  --output /workspace/stcp/benchmark_runs/lexstl_nuplan/canonical.jsonl \
+  --sidecar-meta /workspace/stcp/benchmark_runs/lexstl_nuplan/sidecar_meta.json \
   --prediction-mode cv \
   --limit-scenarios 10 \
   --max-anchors-per-scenario 20 \
@@ -106,9 +110,9 @@ environment used for the build:
 export PY=/opt/nuplan_env/bin/python
 
 "$PY" nuplan-evaluations/run_nuplan_canonical.py \
-  --input /tmp/lexstl_nuplan/canonical.jsonl \
+  --input /workspace/stcp/benchmark_runs/lexstl_nuplan/canonical.jsonl \
   --config commonroad-evaluations/config/default_config.yaml \
-  --output-dir /tmp/lexstl_nuplan/igo_smoke \
+  --output-dir /workspace/stcp/benchmark_runs/lexstl_nuplan/igo_smoke \
   --max-scenarios 5 \
   --max-frames-per-scenario 20
 ~~~

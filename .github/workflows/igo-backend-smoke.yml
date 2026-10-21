@@ -1,0 +1,68 @@
+name: IGO backend smoke
+
+on:
+  push:
+    branches:
+      - feat/replace-mppi-with-fom-igo
+  pull_request:
+    branches:
+      - igo
+      - main
+    paths:
+      - "commonroad-evaluations/CMakeLists.txt"
+      - "commonroad-evaluations/config/**"
+      - "commonroad-evaluations/lex_stl_planner/cpp/config/**"
+      - "commonroad-evaluations/lex_stl_planner/cpp/planner/**"
+      - "commonroad-evaluations/lex_stl_planner/tests/**"
+      - ".github/workflows/igo-backend-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  igo-cxx-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lightweight C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libeigen3-dev libyaml-cpp-dev
+
+      - name: Build and run block-xNES regression
+        run: |
+          g++ -std=c++17 \
+            -I/usr/include/eigen3 \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/planner \
+            commonroad-evaluations/lex_stl_planner/tests/fom_igo_block_updater_test.cpp \
+            -o /tmp/fom_igo_block_updater_test
+          /tmp/fom_igo_block_updater_test
+
+      - name: Build and run canonical IGO config regression
+        run: |
+          g++ -std=c++17 \
+            -I/usr/include/eigen3 \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/config \
+            commonroad-evaluations/lex_stl_planner/tests/fom_igo_config_test.cpp \
+            -lyaml-cpp \
+            -o /tmp/fom_igo_config_test
+          cd commonroad-evaluations
+          /tmp/fom_igo_config_test
+
+      - name: Syntax-check production IGO planner translation unit
+        run: |
+          g++ -std=c++17 -fopenmp -fsyntax-only \
+            -I/usr/include/eigen3 \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/config \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/planner \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/system \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/cost \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/stl \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/utils \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/bindings \
+            -Icommonroad-evaluations/lex_stl_planner/cpp/profiling \
+            -Icommonroad-evaluations/external/frenetix \
+            -Icommonroad-evaluations/external/third_party/lhslib/src/lhslib \
+            -Icommonroad-evaluations/external/third_party/lhslib/src/bclib \
+            commonroad-evaluations/lex_stl_planner/cpp/planner/mppi_planner.cpp

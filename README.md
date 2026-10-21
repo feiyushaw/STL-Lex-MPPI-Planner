@@ -3,6 +3,19 @@
 The historical MPPI planner interface is retained for compatibility, but the
 active optimization backend on the main planner path is IGO/xNES.
 
+The active backend is configured under `planner.igo` in
+`commonroad-evaluations/config/default_config.yaml`. It uses independent
+Gaussian latent samples by default, as assumed by xNES. The old
+`planner.mppi` section remains for compatibility and for the separate
+preemptive-MPPI implementation; it no longer controls the active IGO optimizer.
+
+Important certificate boundary: the CommonRoad C++ planner currently uses a
+specialized operational-limit prefix guard. It is **not** the general
+semi-Lagrangian HJB certificate implemented in the Python FOM benchmark.
+That HJB certificate is not enabled for arbitrary Lex-STL costs because its
+dynamics and Bolza objective must be proved compatible before its lower bound
+can safely prune those rollouts.
+
 Code to reproduce the numerical experiments from:
 
 Patrick Halder, Lothar Kiltz, Hannes Homburger, Johannes Reuter, Matthias Althoff,

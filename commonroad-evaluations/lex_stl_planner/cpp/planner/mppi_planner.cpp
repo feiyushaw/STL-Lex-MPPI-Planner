@@ -18,19 +18,16 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
                          const std::vector<std::vector<double>> &intersections,
                          const std::vector<std::vector<double>> &bus_stops)
     : BasePlanner(cfg, reference_path, corridor_width, speed_limits, stop_signs, intersections, bus_stops),
-      seed_(cfg.planner.mppi.seed),
-      n_samples_initial_(cfg.planner.mppi.n_samples_initial),
-      num_iterations_(cfg.planner.mppi.num_iterations),
-      initial_covariance_(cfg.planner.mppi.initial_covariance),
-      initial_lambda_(cfg.planner.mppi.initial_lambda),
-      gamma_(cfg.planner.mppi.gamma),
-      beta_decay_method_(cfg.planner.mppi.beta_decay_method),
-      beta_min_(cfg.planner.mppi.beta_min),
-      sample_count_decay_method_(cfg.planner.mppi.sample_count_decay_method),
-      n_samples_final_(cfg.planner.mppi.n_samples_final),
-      cfg_ptr_(&cfg),
-      sampling_method_(cfg.planner.mppi.sampling_method),
-      return_best_sample_(cfg.planner.mppi.return_best_sample)
+      seed_(cfg.planner.igo.seed),
+      n_samples_initial_(cfg.planner.igo.n_samples_initial),
+      num_iterations_(cfg.planner.igo.num_iterations),
+      initial_covariance_(cfg.planner.igo.initial_covariance),
+      reporting_effort_weight_(cfg.planner.igo.reporting_effort_weight),
+      sample_count_decay_method_(cfg.planner.igo.sample_count_decay_method),
+      n_samples_final_(cfg.planner.igo.n_samples_final),
+      sampling_method_(cfg.planner.igo.sampling_method),
+      return_best_sample_(cfg.planner.igo.return_best_sample),
+      cfg_ptr_(&cfg)
 {
     assert(initial_covariance_.isDiagonal() && "The covariance matrix must be diagonal!");
 
@@ -96,17 +93,25 @@ MPPIPlanner::MPPIPlanner(const Config &cfg,
         op_limits_weight_ = static_cast<uint64_t>(1) << (total_bits - rule_bits[0]);
     }
 
-    const auto &igo_cfg = cfg.planner.mppi.igo;
+    const auto &igo_cfg = cfg.planner.igo;
     block_steps_ = igo_cfg.block_steps;
     elite_quantile_ = igo_cfg.elite_quantile;
     lr_mean_ = igo_cfg.lr_mean;
     lr_cov_ = igo_cfg.lr_cov;
-    enable_certificate_pruning_ = igo_cfg.enable_certificate_pruning;
+    enable_operational_limit_pruning_ = igo_cfg.enable_operational_limit_pruning;
 
     if (block_steps_ <= 0 || elite_quantile_ <= 0.0 || elite_quantile_ > 1.0 ||
         lr_mean_ < 0.0 || lr_cov_ < 0.0)
     {
         throw std::invalid_argument("Invalid FOM-IGO configuration");
+    }
+    if (!isSupportedFOMIGOSamplingMethod(sampling_method_))
+    {
+        throw std::invalid_argument("Unsupported FOM-IGO sampling_method: " + sampling_method_);
+    }
+    if (!std::isfinite(reporting_effort_weight_) || reporting_effort_weight_ < 0.0)
+    {
+        throw std::invalid_argument("IGO reporting_effort_weight must be finite and non-negative");
     }
 
     block_slices_ = FOMIGOBlockUpdater::buildBlockSlices(control_horizon_, block_steps_);
@@ -145,7 +150,7 @@ std::vector<Eigen::MatrixXd> MPPIPlanner::initializeBlockFactors() const
     return A_blocks;
 }
 
-std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> MPPIPlanner::forwardRolloutWithCertificatePruning(
+std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> MPPIPlanner::forwardRolloutWithOperationalLimitPruning(
     const Eigen::MatrixXd &control_input,
     uint64_t incumbent_best_cost) const
 {
@@ -153,7 +158,7 @@ std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> MPPIPlanner::forwar
     Eigen::MatrixXd y(y_dim_, K_);
 
     x.col(0) = data_.x_0;
-    const bool check_op_limits = enable_certificate_pruning_ && (op_limits_weight_ > 0) && (incumbent_best_cost < op_limits_weight_);
+    const bool check_op_limits = enable_operational_limit_pruning_ && (op_limits_weight_ > 0) && (incumbent_best_cost < op_limits_weight_);
     const double v_min = cfg_ptr_->ego.v_limits[0];
     const double v_max = cfg_ptr_->ego.v_limits[1];
     const double delta_min = cfg_ptr_->ego.steering_angle_limits[0];
@@ -164,7 +169,7 @@ std::tuple<bool, Eigen::MatrixXd, Eigen::MatrixXd, uint64_t> MPPIPlanner::forwar
         x.col(k + 1) = system_.f(x.col(k), control_input.col(k));
         y.col(k) = system_.g(x.col(k), control_input.col(k));
 
-        // Corollary 1 & Proposition 4 Prefix Certificate Pruning:
+        // Operational-limit prefix guard:
         // If operational limits are violated at step k+1 and an incumbent already satisfies operational limits,
         // the trajectory lower bound is at least op_limits_weight_ > incumbent_best_cost.
         if (check_op_limits)
@@ -323,17 +328,17 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
                     // whitened coordinates s, before projection.
                 }
 
-                if (enable_certificate_pruning_)
+                if (enable_operational_limit_pruning_)
                 {
                     auto [pruned, x_sample, y_sample, pruned_cost] =
-                        forwardRolloutWithCertificatePruning(u_sample, incumbent_best_cost);
+                        forwardRolloutWithOperationalLimitPruning(u_sample, incumbent_best_cost);
                     if (pruned)
                     {
                         standard_samples[n] = s_sample;
                         u_samples[n] = std::move(u_sample);
                         x[n] = std::move(x_sample);
                         y[n] = std::move(y_sample);
-                        // A certificate-pruned rollout is discarded. Its
+                        // A operational-limit-pruned rollout is discarded. Its
                         // optimistic lower bound must never participate in
                         // elite ranking as though it were an evaluated cost.
                         scalarized_costs[n] = std::numeric_limits<uint64_t>::max();
@@ -388,8 +393,8 @@ std::tuple<Eigen::MatrixXd, std::vector<Eigen::MatrixXd>, Eigen::MatrixXd, uint6
         }
     }
 
-    // Certificate pruning follows the paper's "terminate and discard"
-    // semantics. Never use a pruned lower bound as an elite observation.
+    // Operational-limit pruning is a specialized rulebook prefix guard, not
+    // the independent semi-Lagrangian HJB certificate. Discard pruned samples.
     if (indices.empty())
     {
         return {control_input, x, control_input, incumbent_best_cost};
@@ -467,7 +472,7 @@ void MPPIPlanner::initializeCostFunction(const Config &cfg)
 double MPPIPlanner::calculateRemainingInputCost(const Eigen::MatrixXd &u) const
 {
     // Reporting-only effort term; it is not part of IGO ranking.
-    Eigen::MatrixXd R_ = initial_lambda_ * initial_covariance_.inverse();
+    Eigen::MatrixXd R_ = reporting_effort_weight_ * initial_covariance_.inverse();
 
     double cost = 0.0;
     for (int k = 0; k < control_horizon_; ++k)
@@ -578,7 +583,8 @@ void MPPIPlanner::initializeParameterValues()
         // has no beta/temperature shrinkage.
         beta_schedule_.push_back(1.0);
         covariance_schedule_.push_back(initial_covariance_);
-        lambda_schedule_.push_back(initial_lambda_);
+        // Compatibility-only diagnostic; this is not an MPPI temperature.
+        lambda_schedule_.push_back(1.0);
         sample_count_schedule_.push_back(calculateNumberOfSamples(i));
     }
 }
@@ -603,7 +609,7 @@ void MPPIPlanner::printPlannerInfo() const
     std::cout << "Elite quantile:   " << elite_quantile_ << std::endl;
     std::cout << "Mean LR:          " << lr_mean_ << std::endl;
     std::cout << "Covariance LR:    " << lr_cov_ << std::endl;
-    std::cout << "Cert. pruning:    " << (enable_certificate_pruning_ ? "enabled" : "disabled") << std::endl;
+    std::cout << "Operational-limit pruning:    " << (enable_operational_limit_pruning_ ? "enabled" : "disabled") << std::endl;
     std::cout << "==========================================================\n"
               << std::endl;
 }

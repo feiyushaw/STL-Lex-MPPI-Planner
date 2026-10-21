@@ -70,6 +70,7 @@ jobs:
             -Icommonroad-evaluations/lex_stl_planner/cpp/bindings \
             -Icommonroad-evaluations/lex_stl_planner/cpp/profiling \
             -Icommonroad-evaluations/external/frenetix \
+            -Icommonroad-evaluations/external/clcs/include \
             -Icommonroad-evaluations/external/third_party/lhslib/src/lhslib \
             -Icommonroad-evaluations/external/third_party/lhslib/src/bclib \
             commonroad-evaluations/lex_stl_planner/cpp/planner/mppi_planner.cpp

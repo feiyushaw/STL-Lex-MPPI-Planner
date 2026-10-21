@@ -99,7 +99,7 @@ private:
     // Active IGO configuration. The covariance factor A is evolved by xNES;
     // no MPPI temperature or beta schedule participates in the optimizer.
     Eigen::MatrixXd initial_covariance_;
-    double reporting_effort_weight_;
+    double effort_tiebreak_weight_;
     std::string sample_count_decay_method_;
     int n_samples_final_;
     std::string sampling_method_;

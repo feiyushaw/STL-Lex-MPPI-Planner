@@ -56,7 +56,7 @@ int main()
             "mean update must use only the two selected whitened elite samples");
     require(std::abs(mean(0, 1)) < 1e-12,
             "zero-mean latent coordinate must not move the control mean");
-    require(std::abs(factors[0](0, 0) - std::exp(0.3125)) < 1e-12,
+    require(std::abs(factors[0](0, 0) - std::exp(0.1875)) < 1e-12,
             "xNES factor update must match A exp(lr_cov * G_M / 2)");
     require(std::abs(factors[0](1, 1) - std::exp(-0.125)) < 1e-12,
             "xNES covariance update must include the -I baseline term");

@@ -2,11 +2,21 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
 #include <unsupported/Eigen/MatrixFunctions>
+
+// Supported latent sampling policies. pureRandom is the default because xNES
+// assumes Gaussian latent samples; LHS variants remain opt-in experimental
+// designs for compatibility and controlled comparison.
+inline bool isSupportedFOMIGOSamplingMethod(const std::string &method)
+{
+    return method == "pureRandom" || method == "randomLHS" ||
+           method == "improvedLHS" || method == "maximinLHS";
+}
 
 // FOM-IGO primal search utilities.
 //

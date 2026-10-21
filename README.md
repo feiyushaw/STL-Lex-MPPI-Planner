@@ -63,3 +63,13 @@ Patrick Halder: patrick.halder@tum.de
   volume  = {7},
 }
 ```
+
+
+## nuPlan integration for FOM-IGO
+
+A separate adapter and recorded-observation replay entry point is available in
+[nuplan-evaluations](nuplan-evaluations/README.md). It consumes STCP Canonical
+JSONL v1, reuses the existing C++ IGO planner, and emits reproducible per-scenario
+and per-tick reports. The current adapter explicitly disables rulebook entries
+whose required map semantics are not represented by Canonical JSONL v1; see its
+README for build/run commands and the scope of the first validation gate.

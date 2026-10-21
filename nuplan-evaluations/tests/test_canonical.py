@@ -118,7 +118,7 @@ class CanonicalAdapterTests(unittest.TestCase):
     def test_loader_reports_malformed_json_with_line_number(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.jsonl"
-            path.write_text('{"schema_version": 1}\nnot-json\n', encoding="utf-8")
+            path.write_text('\nnot-json\n', encoding="utf-8")
             with self.assertRaisesRegex(CanonicalFormatError, "line 2"):
                 load_canonical_jsonl(path)
 

@@ -1,7 +1,10 @@
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
+#include <yaml-cpp/yaml.h>
 #include "config.hpp"
 
 int main()
@@ -41,6 +44,33 @@ int main()
         cfg.planner.igo.block_steps != 5)
     {
         std::cerr << "Canonical IGO xNES settings were not parsed" << std::endl;
+        return 1;
+    }
+
+    // Remove the canonical section from a temporary copy to exercise the
+    // backwards-compatible fallback to planner.mppi and planner.mppi.igo.
+    YAML::Node legacy_yaml = YAML::LoadFile("config/default_config.yaml");
+    legacy_yaml["planner"].remove("igo");
+    const std::filesystem::path legacy_path =
+        std::filesystem::temp_directory_path() / "fom_igo_legacy_config_fallback.yaml";
+    YAML::Emitter emitter;
+    emitter << legacy_yaml;
+    {
+        std::ofstream legacy_file(legacy_path);
+        if (!legacy_file)
+        {
+            std::cerr << "Could not create temporary legacy config" << std::endl;
+            return 1;
+        }
+        legacy_file << emitter.c_str();
+    }
+    const Config legacy_cfg(legacy_path.string());
+    std::filesystem::remove(legacy_path);
+    if (legacy_cfg.planner.igo.num_iterations != legacy_cfg.planner.mppi.num_iterations ||
+        legacy_cfg.planner.igo.n_samples_initial != legacy_cfg.planner.mppi.n_samples_initial ||
+        legacy_cfg.planner.igo.sampling_method != "pureRandom")
+    {
+        std::cerr << "Legacy YAML did not seed the canonical IGO config correctly" << std::endl;
         return 1;
     }
 

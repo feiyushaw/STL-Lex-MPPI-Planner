@@ -23,6 +23,32 @@ The production C++ guard only stops a rollout when an operational-limit violatio
 
 The Python FOM/HJB benchmark constructs a certificate for a specific constant-speed unicycle Bolza objective. It must not prune arbitrary Lex-STL trajectories until the state dynamics, running/terminal objective, admissible set, interpolation error and corrected lower bound are shown to be compatible with the exact production objective. Keeping these mechanisms separately named is intentional and prevents an unsupported certificate claim.
 
+## Reproduction commands
+
+From the repository root, in the Ubuntu environment with the project's CMake dependencies installed:
+
+```bash
+cmake -S commonroad-evaluations -B commonroad-evaluations/build -DBUILD_FOM_IGO_TESTS=ON
+cmake --build commonroad-evaluations/build --target lex_stl_planner_bindings fom_igo_block_updater_test fom_igo_config_test --parallel 2
+ctest --test-dir commonroad-evaluations/build --output-on-failure
+```
+
+Then run the existing Python FOM/IGO suite from its experiment directory:
+
+```bash
+cd effects-of-discretization-and-solver-evaluations
+python -m pytest -q tests
+```
+
+Run the representative CommonRoad replay from the CommonRoad directory:
+
+```bash
+cd commonroad-evaluations
+python run_cr_scenario.py
+```
+
+These commands are a validation recipe, not a claim that the commands have already passed in this session.
+
 ## Validation gates
 
 1. Build the CommonRoad pybind module and run all existing CTest/Python tests.

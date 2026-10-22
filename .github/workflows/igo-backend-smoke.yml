@@ -5,12 +5,14 @@ on:
     branches:
       - igo
       - main
+      - feat/replace-mppi-with-fom-igo
     paths:
       - "commonroad-evaluations/CMakeLists.txt"
       - "commonroad-evaluations/config/**"
       - "commonroad-evaluations/lex_stl_planner/cpp/config/**"
       - "commonroad-evaluations/lex_stl_planner/cpp/planner/**"
       - "commonroad-evaluations/lex_stl_planner/tests/**"
+      - "nuplan-evaluations/**"
       - ".github/workflows/igo-backend-smoke.yml"
 
 permissions:
@@ -18,7 +20,7 @@ permissions:
 
 jobs:
   igo-cxx-smoke:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, docker]
     steps:
       - uses: actions/checkout@v4
 
@@ -50,9 +52,14 @@ jobs:
       - name: Run Python FOM-IGO regression tests
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy scipy pytest
+          python -m pip install numpy scipy pytest pyyaml
           cd effects-of-discretization-and-solver-evaluations
           python -m pytest -q tests/test_fom_igo_solver.py tests/test_fom_certificate_igo.py
+
+      - name: Run nuPlan Canonical JSONL adapter tests
+        run: |
+          python -m unittest discover -s nuplan-evaluations/tests -v
+          python -m compileall -q nuplan-evaluations
 
       - name: Syntax-check production IGO planner translation unit
         run: |

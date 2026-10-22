@@ -3,6 +3,7 @@
 #include <yaml-cpp/yaml.h>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <map>
 #include <vector>
 #include <tuple>
@@ -97,6 +98,16 @@ struct PlannerGeneralConfig
     double dt;        // Time step [s]
 };
 
+struct PlannerIGOConfig
+{
+    double elite_quantile = 0.05;
+    int block_steps = 5;
+    double lr_mean = 1.0;
+    double lr_cov = 0.25;
+    bool enable_certificate_pruning = true; // Legacy nested key; means operational-limit prefix pruning.
+    std::string sampling_method = "pureRandom";
+};
+
 struct PlannerMPPIConfig
 {
     int num_iterations;                    // Number of MPPI iterations J
@@ -110,7 +121,29 @@ struct PlannerMPPIConfig
     int n_samples_final;                   // Final number of samples M_final
     std::string sampling_method;           // Sampling method: "pureRandom", "randomLHS", "improvedLHS", or "maximinLHS"
     unsigned int seed;                     // Random seed for reproducibility
-    bool return_best_sample;               // If true, return the best overall sample instead of the weighted MPPI average solution
+    bool return_best_sample;               // If true, return the best overall sample
+    PlannerIGOConfig igo;                    // Active IGO backend configuration
+};
+
+// Canonical configuration for the active FOM-IGO/xNES planner. The old
+// planner.mppi section remains available for downstream compatibility and for
+// the independent legacy preemptive-MPPI planner.
+struct PlannerFOMIGOConfig
+{
+    int num_iterations = 20;
+    int n_samples_initial = 1000;
+    Eigen::MatrixXd initial_covariance;
+    std::string sample_count_decay_method = "cosine";
+    int n_samples_final = 100;
+    std::string sampling_method = "pureRandom";
+    unsigned int seed = 123;
+    bool return_best_sample = true;
+    double elite_quantile = 0.05;
+    int block_steps = 5;
+    double lr_mean = 1.0;
+    double lr_cov = 0.25;
+    bool enable_operational_limit_pruning = true;
+    double reporting_effort_weight = 1.0;
 };
 
 struct PlannerPreemptiveMPPIConfig
@@ -199,6 +232,7 @@ struct PlannerDEConfig
 struct PlannerConfig
 {
     PlannerGeneralConfig general;
+    PlannerFOMIGOConfig igo;
     PlannerMPPIConfig mppi;
     PlannerPreemptiveMPPIConfig preemptive_mppi;
     PlannerRandomShootingConfig random_shooting;
@@ -340,6 +374,76 @@ public:
         planner.mppi.sampling_method = config["planner"]["mppi"]["sampling_method"].as<std::string>();
         planner.mppi.seed = config["planner"]["mppi"]["seed"].as<unsigned int>();
         planner.mppi.return_best_sample = config["planner"]["mppi"]["return_best_sample"].as<bool>();
+
+        YAML::Node igo_cfg = config["planner"]["mppi"]["igo"];
+        if (igo_cfg)
+        {
+            if (igo_cfg["elite_quantile"]) planner.mppi.igo.elite_quantile = igo_cfg["elite_quantile"].as<double>();
+            if (igo_cfg["block_steps"]) planner.mppi.igo.block_steps = igo_cfg["block_steps"].as<int>();
+            if (igo_cfg["lr_mean"]) planner.mppi.igo.lr_mean = igo_cfg["lr_mean"].as<double>();
+            if (igo_cfg["lr_cov"]) planner.mppi.igo.lr_cov = igo_cfg["lr_cov"].as<double>();
+            if (igo_cfg["enable_certificate_pruning"]) planner.mppi.igo.enable_certificate_pruning = igo_cfg["enable_certificate_pruning"].as<bool>();
+            if (igo_cfg["sampling_method"]) planner.mppi.igo.sampling_method = igo_cfg["sampling_method"].as<std::string>();
+        }
+
+        // Initialize the canonical IGO configuration from legacy values first,
+        // then apply any explicit planner.igo overrides. This keeps older YAML
+        // files working while removing MPPI temperature/sampling settings from
+        // the active IGO path.
+        planner.igo.num_iterations = planner.mppi.num_iterations;
+        planner.igo.n_samples_initial = planner.mppi.n_samples_initial;
+        planner.igo.initial_covariance = planner.mppi.initial_covariance;
+        planner.igo.sample_count_decay_method = planner.mppi.sample_count_decay_method;
+        planner.igo.n_samples_final = planner.mppi.n_samples_final;
+        planner.igo.sampling_method = planner.mppi.igo.sampling_method;
+        planner.igo.seed = planner.mppi.seed;
+        planner.igo.return_best_sample = planner.mppi.return_best_sample;
+        planner.igo.elite_quantile = planner.mppi.igo.elite_quantile;
+        planner.igo.block_steps = planner.mppi.igo.block_steps;
+        planner.igo.lr_mean = planner.mppi.igo.lr_mean;
+        planner.igo.lr_cov = planner.mppi.igo.lr_cov;
+        planner.igo.enable_operational_limit_pruning = planner.mppi.igo.enable_certificate_pruning;
+        planner.igo.reporting_effort_weight = 1.0;
+
+        YAML::Node fom_igo_cfg = config["planner"]["igo"];
+        if (fom_igo_cfg)
+        {
+            if (fom_igo_cfg["num_iterations"]) planner.igo.num_iterations = fom_igo_cfg["num_iterations"].as<int>();
+            if (fom_igo_cfg["n_samples_initial"]) planner.igo.n_samples_initial = fom_igo_cfg["n_samples_initial"].as<int>();
+            if (fom_igo_cfg["initial_covariance"])
+            {
+                std::vector<std::vector<double>> igo_cov_vec = fom_igo_cfg["initial_covariance"].as<std::vector<std::vector<double>>>();
+                if (igo_cov_vec.empty() || igo_cov_vec[0].empty())
+                {
+                    throw std::runtime_error("planner.igo.initial_covariance must be a non-empty matrix");
+                }
+                Eigen::MatrixXd igo_cov_mat(igo_cov_vec.size(), igo_cov_vec[0].size());
+                for (size_t i = 0; i < igo_cov_vec.size(); ++i)
+                {
+                    if (igo_cov_vec[i].size() != igo_cov_vec[0].size())
+                    {
+                        throw std::runtime_error("planner.igo.initial_covariance rows must have equal lengths");
+                    }
+                    igo_cov_mat.row(i) = Eigen::Map<Eigen::VectorXd>(igo_cov_vec[i].data(), igo_cov_vec[i].size());
+                }
+                planner.igo.initial_covariance = igo_cov_mat;
+            }
+            if (fom_igo_cfg["sample_count_decay_method"]) planner.igo.sample_count_decay_method = fom_igo_cfg["sample_count_decay_method"].as<std::string>();
+            if (fom_igo_cfg["n_samples_final"]) planner.igo.n_samples_final = fom_igo_cfg["n_samples_final"].as<int>();
+            if (fom_igo_cfg["sampling_method"]) planner.igo.sampling_method = fom_igo_cfg["sampling_method"].as<std::string>();
+            if (fom_igo_cfg["seed"]) planner.igo.seed = fom_igo_cfg["seed"].as<unsigned int>();
+            if (fom_igo_cfg["return_best_sample"]) planner.igo.return_best_sample = fom_igo_cfg["return_best_sample"].as<bool>();
+            if (fom_igo_cfg["elite_quantile"]) planner.igo.elite_quantile = fom_igo_cfg["elite_quantile"].as<double>();
+            if (fom_igo_cfg["block_steps"]) planner.igo.block_steps = fom_igo_cfg["block_steps"].as<int>();
+            if (fom_igo_cfg["lr_mean"]) planner.igo.lr_mean = fom_igo_cfg["lr_mean"].as<double>();
+            if (fom_igo_cfg["lr_cov"]) planner.igo.lr_cov = fom_igo_cfg["lr_cov"].as<double>();
+            if (fom_igo_cfg["enable_operational_limit_pruning"])
+                planner.igo.enable_operational_limit_pruning = fom_igo_cfg["enable_operational_limit_pruning"].as<bool>();
+            else if (fom_igo_cfg["enable_certificate_pruning"])
+                planner.igo.enable_operational_limit_pruning = fom_igo_cfg["enable_certificate_pruning"].as<bool>();
+            if (fom_igo_cfg["reporting_effort_weight"])
+                planner.igo.reporting_effort_weight = fom_igo_cfg["reporting_effort_weight"].as<double>();
+        }
 
         // Parse preemptive_mppi section (optional, defaults to MPPI parameters if not present)
         YAML::Node preemptive_mppi_cfg = config["planner"]["preemptive_mppi"];

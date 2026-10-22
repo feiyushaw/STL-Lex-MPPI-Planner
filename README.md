@@ -1,5 +1,25 @@
 # STL-Lex-MPPI-Planner
 
+The historical MPPI planner interface is retained for compatibility, but the
+active optimization backend on the main planner path is IGO/xNES.
+
+The active backend is configured under `planner.igo` in
+`commonroad-evaluations/config/default_config.yaml`. It uses independent
+Gaussian latent samples by default, as assumed by xNES. The old
+`planner.mppi` section remains for compatibility and for the separate
+preemptive-MPPI implementation; it no longer controls the active IGO optimizer.
+
+Important certificate boundary: the CommonRoad C++ planner currently uses a
+specialized operational-limit prefix guard. It is **not** the general
+semi-Lagrangian HJB certificate implemented in the Python FOM benchmark.
+That HJB certificate is not enabled for arbitrary Lex-STL costs because its
+dynamics and Bolza objective must be proved compatible before its lower bound
+can safely prune those rollouts.
+
+See [the IGO backend migration contract](commonroad-evaluations/docs/igo_backend_migration.md) for the canonical config, compatibility fallback, and Ubuntu validation commands.
+
+The reported input-effort diagnostic has a separate `reporting_effort_weight`; it does not enter selection. The primary ranking is the Lex-STL integer cost, with a fixed small control-norm term used only when primary costs tie.
+
 Code to reproduce the numerical experiments from:
 
 Patrick Halder, Lothar Kiltz, Hannes Homburger, Johannes Reuter, Matthias Althoff,
@@ -16,7 +36,7 @@ This repository has two main experiment directories:
 1. [effects-of-discretization-and-solver-evaluations](effects-of-discretization-and-solver-evaluations)
 	 - Contains the experiments for:
 		 - effects of discretization,
-		 - MPPI solver adaptations,
+		 - IGO/xNES solver replacement for the historical MPPI backend,
 		 - comparison of robustness measures
 	 - Installation and usage instructions are in its local README.
 

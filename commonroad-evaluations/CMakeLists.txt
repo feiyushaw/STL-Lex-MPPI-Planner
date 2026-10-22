@@ -50,6 +50,34 @@ target_link_libraries(lex_stl_planner_bindings PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(lex_stl_planner_bindings PRIVATE yaml-cpp)
 target_link_libraries(lex_stl_planner_bindings PRIVATE Pagmo::pagmo)
 
+# Lightweight regression target for the header-only FOM-IGO xNES updater.
+option(BUILD_FOM_IGO_TESTS "Build FOM-IGO unit tests" ON)
+if(BUILD_FOM_IGO_TESTS)
+    enable_testing()
+    add_executable(fom_igo_block_updater_test
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/tests/fom_igo_block_updater_test.cpp
+    )
+    target_include_directories(fom_igo_block_updater_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/cpp/planner
+        ${EIGEN3_INCLUDE_DIR}
+    )
+    target_link_libraries(fom_igo_block_updater_test PRIVATE Eigen3::Eigen)
+    add_test(NAME fom_igo_block_updater_test COMMAND fom_igo_block_updater_test)
+
+    # Exercise YAML parsing of the canonical planner.igo section and ensure
+    # legacy MPPI sampling settings do not leak into the active IGO backend.
+    add_executable(fom_igo_config_test
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/tests/fom_igo_config_test.cpp
+    )
+    target_include_directories(fom_igo_config_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/lex_stl_planner/cpp/config
+        ${EIGEN3_INCLUDE_DIR}
+    )
+    target_link_libraries(fom_igo_config_test PRIVATE Eigen3::Eigen yaml-cpp)
+    add_test(NAME fom_igo_config_test COMMAND fom_igo_config_test)
+    set_tests_properties(fom_igo_config_test PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
+
 # Add external dependencies
 if(EXISTS ${CMAKE_SOURCE_DIR}/external/third_party/CMakeLists.txt)
     add_subdirectory(external/third_party)

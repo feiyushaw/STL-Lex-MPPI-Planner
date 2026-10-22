@@ -3,7 +3,7 @@
 This repository contains three main scripts:
 - `example_scenario.py`: single-scenario run plus interval-count parameter study
 - `batch_evaluations.py`: Monte Carlo style batch evaluation across sampled scenarios
-- `solver_evaluations.py`: MPPI ablation and solver-focused evaluation
+- `solver_evaluations.py`: IGO/xNES solver-focused evaluation against the discrete reachable-set optimum
 
 ## Requirements
 

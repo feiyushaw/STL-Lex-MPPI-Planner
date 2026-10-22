@@ -40,6 +40,15 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def_readwrite("time_horizon", &PlannerGeneralConfig::time_horizon)
         .def_readwrite("dt", &PlannerGeneralConfig::dt);
 
+    py::class_<PlannerIGOConfig>(m, "PlannerIGOConfig")
+        .def(py::init<>())
+        .def_readwrite("elite_quantile", &PlannerIGOConfig::elite_quantile)
+        .def_readwrite("block_steps", &PlannerIGOConfig::block_steps)
+        .def_readwrite("lr_mean", &PlannerIGOConfig::lr_mean)
+        .def_readwrite("lr_cov", &PlannerIGOConfig::lr_cov)
+        .def_readwrite("enable_certificate_pruning", &PlannerIGOConfig::enable_certificate_pruning)
+        .def_readwrite("sampling_method", &PlannerIGOConfig::sampling_method);
+
     py::class_<PlannerMPPIConfig>(m, "PlannerMPPIConfig")
         .def(py::init<>())
         .def_readwrite("num_iterations", &PlannerMPPIConfig::num_iterations)
@@ -53,7 +62,25 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def_readwrite("n_samples_final", &PlannerMPPIConfig::n_samples_final)
         .def_readwrite("sampling_method", &PlannerMPPIConfig::sampling_method)
         .def_readwrite("seed", &PlannerMPPIConfig::seed)
-        .def_readwrite("return_best_sample", &PlannerMPPIConfig::return_best_sample);
+        .def_readwrite("return_best_sample", &PlannerMPPIConfig::return_best_sample)
+        .def_readwrite("igo", &PlannerMPPIConfig::igo);
+
+    py::class_<PlannerFOMIGOConfig>(m, "PlannerFOMIGOConfig")
+        .def(py::init<>())
+        .def_readwrite("num_iterations", &PlannerFOMIGOConfig::num_iterations)
+        .def_readwrite("n_samples_initial", &PlannerFOMIGOConfig::n_samples_initial)
+        .def_readwrite("initial_covariance", &PlannerFOMIGOConfig::initial_covariance)
+        .def_readwrite("sample_count_decay_method", &PlannerFOMIGOConfig::sample_count_decay_method)
+        .def_readwrite("n_samples_final", &PlannerFOMIGOConfig::n_samples_final)
+        .def_readwrite("sampling_method", &PlannerFOMIGOConfig::sampling_method)
+        .def_readwrite("seed", &PlannerFOMIGOConfig::seed)
+        .def_readwrite("return_best_sample", &PlannerFOMIGOConfig::return_best_sample)
+        .def_readwrite("elite_quantile", &PlannerFOMIGOConfig::elite_quantile)
+        .def_readwrite("block_steps", &PlannerFOMIGOConfig::block_steps)
+        .def_readwrite("lr_mean", &PlannerFOMIGOConfig::lr_mean)
+        .def_readwrite("lr_cov", &PlannerFOMIGOConfig::lr_cov)
+        .def_readwrite("enable_operational_limit_pruning", &PlannerFOMIGOConfig::enable_operational_limit_pruning)
+        .def_readwrite("reporting_effort_weight", &PlannerFOMIGOConfig::reporting_effort_weight);
 
     py::class_<PlannerPreemptiveMPPIConfig>(m, "PlannerPreemptiveMPPIConfig")
         .def(py::init<>())
@@ -134,6 +161,7 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
     py::class_<PlannerConfig>(m, "PlannerConfig")
         .def(py::init<>())
         .def_readwrite("general", &PlannerConfig::general)
+        .def_readwrite("igo", &PlannerConfig::igo)
         .def_readwrite("mppi", &PlannerConfig::mppi)
         .def_readwrite("preemptive_mppi", &PlannerConfig::preemptive_mppi)
         .def_readwrite("random_shooting", &PlannerConfig::random_shooting)
@@ -245,6 +273,10 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def("getProfilerStats", &MPPIPlanner::getProfilerStats)
         .def("getConsideredObstacleIds", &MPPIPlanner::getConsideredObstacleIds)
         .def("getParameterSchedule", &MPPIPlanner::getParameterSchedule);
+
+    // Canonical public name for the active optimizer. The underlying C++ class
+    // remains MPPIPlanner to preserve the existing ABI and downstream bindings.
+    m.attr("IGOPlanner") = m.attr("MPPIPlanner");
 
     py::class_<PreemptiveMPPIPlanner>(m, "PreemptiveMPPIPlanner")
         .def(py::init<

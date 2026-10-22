@@ -8,6 +8,7 @@ from commonroad.planning.planning_problem import PlanningProblem  # type: ignore
 from commonroad.scenario.obstacle import Obstacle, ObstacleRole, ObstacleType  # type: ignore
 from lex_stl_planner.lib.lex_stl_planner_bindings import (  # type: ignore
     MPPIPlanner,
+    IGOPlanner,
     PreemptiveMPPIPlanner,
     RandomShootingPlanner,
     ConstInputPlanner,
@@ -36,6 +37,9 @@ def instantiate_planner(planner_type: str, cfg, scenario):
 
     # Instantiate planner based on selection
     planner_configs = {
+        # "igo" is the canonical optimizer name. The "mppi" entry is retained
+        # only as a compatibility alias for existing experiment scripts.
+        "igo": IGOPlanner,
         "mppi": MPPIPlanner,
         "preemptive_mppi": PreemptiveMPPIPlanner,
         "random_shooting": RandomShootingPlanner,

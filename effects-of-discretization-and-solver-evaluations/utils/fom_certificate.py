@@ -2097,6 +2097,9 @@ def make_paper_unicycle_problem(
                 "joint_control_radius": worst_subcell["joint_control_radius"],
                 "selected_bound_method": worst_subcell["selected_bound_method"],
                 "total_lower": worst_subcell["total_lower"],
+                # Full subcell details are diagnostic-only; they expose the
+                # exact interval boxes used by coverage-audit tests and reports.
+                "subcell_reports": subcell_reports,
                 "residual_gradient_intervals": worst_subcell["residual_gradient_intervals"],
                 "radial_gradient_intervals": worst_subcell["radial_gradient_intervals"],
                 "total_gradient_intervals": worst_subcell["total_gradient_intervals"],

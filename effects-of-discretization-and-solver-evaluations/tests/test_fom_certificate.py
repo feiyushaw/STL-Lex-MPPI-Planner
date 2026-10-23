@@ -888,3 +888,197 @@ def test_heading_extremum_handles_degenerate_and_trigonometric_boundary_cases(
     tolerance = 512.0 * np.finfo(float).eps * scale
     assert actual <= reference + tolerance
     assert reference - actual <= tolerance
+
+
+def _coverage_audit_residual_gradient(values, grid, cell, frac):
+    """Independent derivative of the trilinear residual interpolant."""
+    result = []
+    shape = grid.shape
+    for axis in range(3):
+        other_axes = [idx for idx in range(3) if idx != axis]
+        derivative = 0.0
+        for other_bits in product((0, 1), repeat=2):
+            idx0 = list(cell)
+            idx1 = list(cell)
+            weight = 1.0
+            for j, other_axis in enumerate(other_axes):
+                bit = other_bits[j]
+                node = cell[other_axis] + bit
+                if other_axis in grid.periodic_axes:
+                    node %= shape[other_axis]
+                idx0[other_axis] = node
+                idx1[other_axis] = node
+                t = float(frac[other_axis])
+                weight *= t if bit else 1.0 - t
+            node0 = cell[axis]
+            node1 = cell[axis] + 1
+            if axis in grid.periodic_axes:
+                node0 %= shape[axis]
+                node1 %= shape[axis]
+            idx0[axis] = node0
+            idx1[axis] = node1
+            derivative += weight * (
+                values[tuple(idx1)] - values[tuple(idx0)]
+            )
+        result.append(float(derivative / grid.spacing[axis]))
+    return np.asarray(result, dtype=float)
+
+
+@pytest.mark.parametrize(
+    "obstacles,cells",
+    [
+        ((), ((4, 4, 3), (7, 7, 7))),
+        (
+            ((-0.5, 0.5, -0.4, 0.4),),
+            ((4, 3, 7), (3, 4, 0)),
+        ),
+        (
+            ((-1.0, -0.5, 0.5, 1.0), (0.5, 1.0, -1.0, -0.5)),
+            ((3, 5, 7), (4, 2, 0)),
+        ),
+    ],
+)
+def test_reported_gradient_intervals_cover_dense_subcell_samples(
+    obstacles, cells
+):
+    """Audit gradient interval coverage near obstacles and the periodic seam."""
+    cert = make_small_certificate(
+        iterations=2,
+        obstacles=obstacles,
+        heading_extremum_enclosure=True,
+    )
+    cert.build()
+    grid = cert.grid
+    values = np.asarray(cert.values[-1], dtype=float).reshape(grid.shape)
+    values = np.where(np.isfinite(values), values, 0.0)
+    radial = cert.problem.terminal_cost(grid.nodes).reshape(grid.shape)
+    residual = values - radial
+    h = grid.spacing
+
+    for cell in cells:
+        parent_lo = grid.lower + np.asarray(cell, dtype=float) * h
+        diagnostic = cert.problem.cell_slack_diagnostics(
+            cert.values[-1], grid, cell
+        )["deep"]
+        subcell_reports = diagnostic["subcell_reports"]
+        assert len(subcell_reports) == 4 * 4 * 2
+
+        for subcell in subcell_reports:
+            lo = np.asarray(subcell["subcell_bounds"]["lower"], dtype=float)
+            hi = np.asarray(subcell["subcell_bounds"]["upper"], dtype=float)
+            intervals = np.asarray(
+                subcell["total_gradient_intervals"], dtype=float
+            )
+            residual_intervals = np.asarray(
+                subcell["residual_gradient_intervals"], dtype=float
+            )
+            radial_intervals = np.asarray(
+                subcell["radial_gradient_intervals"], dtype=float
+            )
+            for name, bounds in (
+                ("total", intervals),
+                ("residual", residual_intervals),
+                ("radial", radial_intervals),
+            ):
+                assert bounds.shape == (3, 2), (name, bounds.shape)
+                assert np.all(np.isfinite(bounds)), (name, bounds)
+                assert np.all(bounds[:, 0] <= bounds[:, 1]), (name, bounds)
+
+            # Each trilinear derivative is bilinear in the other two
+            # coordinates and independent of the coordinate differentiated.
+            # Its extrema over this subcell therefore occur at combinations
+            # of the subcell endpoints on the other two axes. Reconstruct the
+            # gradient at this subcell's own eight corners, mapping each point
+            # back to parent-cell coordinates for the independent evaluator.
+            subcell_corner_gradients = np.asarray([
+                _coverage_audit_residual_gradient(
+                    residual,
+                    grid,
+                    cell,
+                    (
+                        lo + np.asarray(corner_frac, dtype=float) * (hi - lo)
+                        - parent_lo
+                    ) / h,
+                )
+                for corner_frac in product((0.0, 1.0), repeat=3)
+            ])
+            assert subcell_corner_gradients.shape == (8, 3)
+            exact_corner_min = np.min(subcell_corner_gradients, axis=0)
+            exact_corner_max = np.max(subcell_corner_gradients, axis=0)
+            interval_tolerance = 2e-10 * max(
+                1.0, float(np.max(np.abs(subcell_corner_gradients)))
+            )
+            assert np.all(
+                residual_intervals[:, 0] <= exact_corner_min + interval_tolerance
+            ), (
+                f"residual lower interval misses subcell-corner extrema: "
+                f"obstacles={obstacles}, cell={cell}, "
+                f"subcell={subcell['subcell_index']}, "
+                f"minimum={exact_corner_min.tolist()}, "
+                f"intervals={residual_intervals.tolist()}"
+            )
+            assert np.all(
+                residual_intervals[:, 1] >= exact_corner_max - interval_tolerance
+            ), (
+                f"residual upper interval misses subcell-corner extrema: "
+                f"obstacles={obstacles}, cell={cell}, "
+                f"subcell={subcell['subcell_index']}, "
+                f"maximum={exact_corner_max.tolist()}, "
+                f"intervals={residual_intervals.tolist()}"
+            )
+
+            # Include each subcell's interior and faces. Samples exactly on
+            # the radial terminal-cost kink are skipped because its classical
+            # gradient is not defined there; nearby points on both sides are
+            # still covered by this tensor sample.
+            for sample_frac in product((0.0, 0.5, 1.0), repeat=3):
+                state = lo + np.asarray(sample_frac, dtype=float) * (hi - lo)
+                distance = float(np.linalg.norm(state[:2]))
+                if abs(distance - 0.5) <= 1e-10:
+                    continue
+
+                parent_frac = (state - parent_lo) / h
+                residual_gradient = _coverage_audit_residual_gradient(
+                    residual, grid, cell, parent_frac
+                )
+                radial_gradient = np.zeros(3, dtype=float)
+                if distance > 0.5:
+                    radial_gradient[:2] = distance * state[:2]
+                total_gradient = residual_gradient + radial_gradient
+
+                radial_scale = np.asarray(radial_intervals, dtype=float)
+                assert np.all(
+                    radial_gradient >= radial_scale[:, 0] - 2e-9
+                ), (
+                    f"radial lower interval missed sample: obstacles={obstacles}, "
+                    f"cell={cell}, subcell={subcell['subcell_index']}, "
+                    f"state={state.tolist()}, radial={radial_gradient.tolist()}, "
+                    f"intervals={radial_scale.tolist()}"
+                )
+                assert np.all(
+                    radial_gradient <= radial_scale[:, 1] + 2e-9
+                ), (
+                    f"radial upper interval missed sample: obstacles={obstacles}, "
+                    f"cell={cell}, subcell={subcell['subcell_index']}, "
+                    f"state={state.tolist()}, radial={radial_gradient.tolist()}, "
+                    f"intervals={radial_scale.tolist()}"
+                )
+
+                scale = max(1.0, float(np.max(np.abs(total_gradient))))
+                tolerance = 2e-9 * scale
+                assert np.all(
+                    total_gradient >= intervals[:, 0] - tolerance
+                ), (
+                    f"lower gradient interval missed sample: obstacles={obstacles}, "
+                    f"cell={cell}, subcell={subcell['subcell_index']}, "
+                    f"state={state.tolist()}, gradient={total_gradient.tolist()}, "
+                    f"intervals={intervals.tolist()}"
+                )
+                assert np.all(
+                    total_gradient <= intervals[:, 1] + tolerance
+                ), (
+                    f"upper gradient interval missed sample: obstacles={obstacles}, "
+                    f"cell={cell}, subcell={subcell['subcell_index']}, "
+                    f"state={state.tolist()}, gradient={total_gradient.tolist()}, "
+                    f"intervals={intervals.tolist()}"
+                )

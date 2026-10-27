@@ -164,3 +164,103 @@ jobs:
             -Icommonroad-evaluations/external/third_party/lhslib/src/lhslib \
             -Icommonroad-evaluations/external/third_party/lhslib/src/bclib \
             commonroad-evaluations/lex_stl_planner/cpp/planner/mppi_planner.cpp
+
+  nuplan-mini-real-replay:
+    if: \${{ github.event.pull_request.number == 6 }}
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify host nuPlan Python ABI and dataset
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -x /opt/nuplan_env/bin/python
+          test -d /data/datasets/nuplan/dataset/nuplan-v1.1_mini/splits/mini
+          test -d /data/datasets/nuplan/dataset/maps
+          /opt/nuplan_env/bin/python - <<'PY'
+          import sys
+          import nuplan
+          if sys.version_info[:2] != (3, 10):
+              raise SystemExit(f"Expected Python 3.10 ABI for nuPlan, got {sys.version}")
+          print(f"nuPlan runtime: Python {sys.version}")
+          print(f"nuPlan package: {nuplan.__file__}")
+          PY
+
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \\
+            cmake g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev libpagmo-dev
+          /opt/nuplan_env/bin/python -m pip install --disable-pip-version-check pybind11 pyyaml
+
+      - name: Build and test pybind module with nuPlan Python ABI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PY=/opt/nuplan_env/bin/python
+          PYBIND11_DIR="$("$PY" -m pybind11 --cmakedir)"
+          cmake -S commonroad-evaluations \\
+            -B commonroad-evaluations/build-nuplan-ci \\
+            -DCMAKE_BUILD_TYPE=Release \\
+            -DPython_EXECUTABLE="$PY" \\
+            -DPython3_EXECUTABLE="$PY" \\
+            -Dpybind11_DIR="$PYBIND11_DIR" \\
+            -DBUILD_FOM_IGO_TESTS=ON
+          cmake --build commonroad-evaluations/build-nuplan-ci --parallel 2
+          ctest --test-dir commonroad-evaluations/build-nuplan-ci --output-on-failure
+          PYTHONPATH="$GITHUB_WORKSPACE/commonroad-evaluations" "$PY" - <<'PY'
+          from lex_stl_planner.lib.lex_stl_planner_bindings import Config, IGOPlanner, PlannerResult
+          result = PlannerResult()
+          assert hasattr(result, "failure_reason")
+          print(f"nuPlan ABI pybind import OK: {Config.__name__}, {IGOPlanner.__name__}")
+          PY
+
+      - name: Export 10 real nuPlan mini scenarios
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PY=/opt/nuplan_env/bin/python
+          ROOT=/data/datasets/nuplan/dataset
+          OUT="$RUNNER_TEMP/stl_lex_igo_nuplan"
+          mkdir -p "$OUT"
+          export NUPLAN_DATA_ROOT="$ROOT"
+          export NUPLAN_MAPS_ROOT="$ROOT/maps"
+          "$PY" nuplan-evaluations/export_nuplan_mini.py \\
+            --data-root "$ROOT" \\
+            --db-dir "$ROOT/nuplan-v1.1_mini/splits/mini" \\
+            --map-root "$ROOT/maps" \\
+            --map-version nuplan-maps-v1.0 \\
+            --output "$OUT/canonical.jsonl" \\
+            --limit-scenarios 10 \\
+            --candidate-scenarios 60 \\
+            --max-anchors-per-scenario 20 \\
+            --subsample-ratio 0.25
+
+      - name: Run continuous nuPlan mini replay and enforce 90 percent success
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PY=/opt/nuplan_env/bin/python
+          OUT="$RUNNER_TEMP/stl_lex_igo_nuplan"
+          export PYTHONPATH="$GITHUB_WORKSPACE/commonroad-evaluations:$GITHUB_WORKSPACE/nuplan-evaluations"
+          "$PY" nuplan-evaluations/run_nuplan_canonical.py \\
+            --input "$OUT/canonical.jsonl" \\
+            --config commonroad-evaluations/config/default_config.yaml \\
+            --output-dir "$OUT/replay" \\
+            --max-scenarios 10 \\
+            --max-frames-per-scenario 20 \\
+            --min-backward-distance-m 12 \\
+            --min-success-rate 0.90
+
+      - name: Archive Canonical input and replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuplan-mini-lexstl-replay
+          path: \${{ runner.temp }}/stl_lex_igo_nuplan/
+          if-no-files-found: warn
+          retention-days: 30

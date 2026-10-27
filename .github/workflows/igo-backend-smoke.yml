@@ -22,6 +22,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Diagnose local host build environment
+        shell: bash
+        run: |
+          set +e
+          echo "== runner =="
+          uname -a
+          id
+          echo "== cached Docker images =="
+          if command -v docker >/dev/null 2>&1; then
+            docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}' | head -80
+          else
+            echo "docker CLI unavailable"
+          fi
+          echo "== package status =="
+          dpkg-query -W -f='${Package} ${Version}\n' g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev 2>&1
+          echo "== Eigen header candidates =="
+          find /usr/include /usr/local/include /opt /home /runner -type f -path '*/Eigen/Core' -print 2>/dev/null | head -30
+          echo "== yaml-cpp header/library candidates =="
+          find /usr/include /usr/local/include /opt /home /runner \( -path '*/yaml-cpp/yaml.h' -o -name 'libyaml-cpp.so*' \) -print 2>/dev/null | head -30
+          echo "== Python test modules =="
+          python3 - <<'PY'
+          import importlib.util
+          for name in ("numpy", "scipy", "pytest", "yaml"):
+              print(f"{name}: {'available' if importlib.util.find_spec(name) else 'missing'}")
+          PY
+
       - name: Verify preinstalled host C++ dependencies
         shell: bash
         run: |

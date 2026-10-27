@@ -5,12 +5,11 @@ on:
     branches:
       - igo
       - main
+      - feat/replace-mppi-with-fom-igo
     paths:
-      - "commonroad-evaluations/CMakeLists.txt"
-      - "commonroad-evaluations/config/**"
-      - "commonroad-evaluations/lex_stl_planner/cpp/config/**"
-      - "commonroad-evaluations/lex_stl_planner/cpp/planner/**"
-      - "commonroad-evaluations/lex_stl_planner/tests/**"
+      - "commonroad-evaluations/**"
+      - "effects-of-discretization-and-solver-evaluations/**"
+      - "nuplan-evaluations/**"
       - ".github/workflows/igo-backend-smoke.yml"
 
 permissions:
@@ -19,13 +18,21 @@ permissions:
 jobs:
   igo-cxx-smoke:
     runs-on: [self-hosted, docker]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install lightweight C++ dependencies
+      - name: Verify preinstalled host C++ dependencies
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev
+          set -euxo pipefail
+          command -v g++
+          test -r /usr/include/eigen3/Eigen/Core
+          test -r /usr/include/yaml-cpp/yaml.h
+          test -r /usr/include/boost/version.hpp
+          test -r /usr/include/spdlog/spdlog.h
+          ldconfig -p | grep -q 'libyaml-cpp'
+          g++ --version
 
       - name: Build and run block-xNES regression
         run: |
@@ -47,12 +54,39 @@ jobs:
           cd commonroad-evaluations
           /tmp/fom_igo_config_test
 
-      - name: Run Python FOM-IGO regression tests
+      - name: Install missing Python test dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install numpy scipy pytest
+          python3 -m pip install --disable-pip-version-check numpy scipy pytest pyyaml
+
+      - name: Run FOM, IGO, and fixed-budget Python regressions
+        shell: bash
+        run: |
+          set -euxo pipefail
           cd effects-of-discretization-and-solver-evaluations
-          python -m pytest -q tests/test_fom_igo_solver.py tests/test_fom_certificate_igo.py
+          tests=()
+          for path in \
+            tests/test_fom_certificate.py \
+            tests/test_fom_certificate_igo.py \
+            tests/test_fom_igo_solver.py \
+            tests/test_fixed_budget_benchmark.py; do
+            if [[ -f "$path" ]]; then tests+=("$path"); fi
+          done
+          if [[ ${#tests[@]} -eq 0 ]]; then
+            echo "No recognized FOM/IGO regression test files were found" >&2
+            exit 1
+          fi
+          printf 'Running tests: %s\n' "${tests[*]}"
+          python3 -m pytest -q "${tests[@]}"
+
+      - name: Run nuPlan Canonical JSONL adapter tests
+        shell: bash
+        run: |
+          if [[ -d nuplan-evaluations/tests ]]; then
+            python3 -m unittest discover -s nuplan-evaluations/tests -v
+            python3 -m compileall -q nuplan-evaluations
+          else
+            echo "nuplan-evaluations not present in this merge tree; skipping adapter tests"
+          fi
 
       - name: Syntax-check production IGO planner translation unit
         run: |

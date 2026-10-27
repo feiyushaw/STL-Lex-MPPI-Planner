@@ -7,6 +7,7 @@
 #include "profiler.hpp"
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <iostream>
 
 // Constructor
@@ -43,17 +44,23 @@ void BasePlanner::initializeCommonParameters(const Config &cfg)
     u_dim_ = system_.getUDim();
 }
 
-// Main planning function with exception handling
+// Main planning function with exception handling and diagnostics preserved for Python.
 PlannerResult BasePlanner::plan(const Eigen::MatrixXd& u_init)
 {
     try
     {
         return planImpl(u_init);
     }
+    catch (const std::exception &e)
+    {
+        std::cerr << "BasePlanner::plan failed: " << e.what() << std::endl;
+        return PlannerResult::createFailure(e.what());
+    }
     catch (...)
     {
-        // Return failure result for any exception
-        return PlannerResult::createFailure();
+        const std::string reason = "unknown non-standard exception in BasePlanner::plan";
+        std::cerr << "BasePlanner::plan failed: " << reason << std::endl;
+        return PlannerResult::createFailure(reason);
     }
 }
 

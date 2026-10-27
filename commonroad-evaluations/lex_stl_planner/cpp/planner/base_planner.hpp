@@ -31,11 +31,14 @@ struct PlannerResult
     std::vector<std::vector<Eigen::MatrixXd>> x_samples{}; // Samples from all iterations
     Eigen::MatrixXd best_overall_sample{};                 // Best overall trajectory (for MPPI planner)
     bool success = false;                                  // Planning success flag
+    std::string failure_reason{};                           // Diagnostic for a failed plan
 
-    // Static helper to create a failure result
-    static PlannerResult createFailure()
+    // Static helper to create a failure result while preserving its cause.
+    static PlannerResult createFailure(const std::string &reason = "unknown planner failure")
     {
-        return PlannerResult{};
+        PlannerResult result{};
+        result.failure_reason = reason;
+        return result;
     }
 };
 

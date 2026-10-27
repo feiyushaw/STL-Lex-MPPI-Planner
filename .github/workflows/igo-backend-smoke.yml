@@ -18,37 +18,39 @@ permissions:
 jobs:
   igo-cxx-smoke:
     runs-on: [self-hosted, docker]
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Diagnose local host build environment
+      - name: Install C++ and Python prerequisites using official Ubuntu archives
         shell: bash
         run: |
-          set +e
-          echo "== runner =="
-          uname -a
-          id
-          echo "== cached Docker images =="
-          if command -v docker >/dev/null 2>&1; then
-            docker image ls --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}' | head -80
-          else
-            echo "docker CLI unavailable"
-          fi
-          echo "== package status =="
-          dpkg-query -W -f='${Package} ${Version}\n' g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev 2>&1
-          echo "== Eigen header candidates =="
-          find /usr/include /usr/local/include /opt /home /runner -type f -path '*/Eigen/Core' -print 2>/dev/null | head -30
-          echo "== yaml-cpp header/library candidates =="
-          find /usr/include /usr/local/include /opt /home /runner \( -path '*/yaml-cpp/yaml.h' -o -name 'libyaml-cpp.so*' \) -print 2>/dev/null | head -30
-          echo "== Python test modules =="
-          python3 - <<'PY'
-          import importlib.util
-          for name in ("numpy", "scipy", "pytest", "yaml"):
-              print(f"{name}: {'available' if importlib.util.find_spec(name) else 'missing'}")
-          PY
+          set -euxo pipefail
+          cat > "$RUNNER_TEMP/igo-ubuntu.sources" <<'EOF'
+          Types: deb
+          URIs: https://archive.ubuntu.com/ubuntu
+          Suites: noble noble-updates noble-backports
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
-      - name: Verify preinstalled host C++ dependencies
+          Types: deb
+          URIs: https://security.ubuntu.com/ubuntu
+          Suites: noble-security
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          APT_SOURCE_ARGS=(
+            -o "Dir::Etc::sourcelist=$RUNNER_TEMP/igo-ubuntu.sources"
+            -o "Dir::Etc::sourceparts=-"
+            -o "APT::Get::List-Cleanup=0"
+          )
+          sudo apt-get "${APT_SOURCE_ARGS[@]}" update
+          sudo apt-get "${APT_SOURCE_ARGS[@]}" install -y --no-install-recommends \
+            g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev python3-venv
+          python3 -m venv "$RUNNER_TEMP/igo-ci-venv"
+          "$RUNNER_TEMP/igo-ci-venv/bin/python" -m pip install --disable-pip-version-check numpy scipy pytest pyyaml
+
+      - name: Verify host C++ dependencies
         shell: bash
         run: |
           set -euxo pipefail
@@ -80,10 +82,6 @@ jobs:
           cd commonroad-evaluations
           /tmp/fom_igo_config_test
 
-      - name: Install missing Python test dependencies
-        run: |
-          python3 -m pip install --disable-pip-version-check numpy scipy pytest pyyaml
-
       - name: Run FOM, IGO, and fixed-budget Python regressions
         shell: bash
         run: |
@@ -102,14 +100,14 @@ jobs:
             exit 1
           fi
           printf 'Running tests: %s\n' "${tests[*]}"
-          python3 -m pytest -q "${tests[@]}"
+          "$RUNNER_TEMP/igo-ci-venv/bin/python" -m pytest -q "${tests[@]}"
 
       - name: Run nuPlan Canonical JSONL adapter tests
         shell: bash
         run: |
           if [[ -d nuplan-evaluations/tests ]]; then
-            python3 -m unittest discover -s nuplan-evaluations/tests -v
-            python3 -m compileall -q nuplan-evaluations
+            "$RUNNER_TEMP/igo-ci-venv/bin/python" -m unittest discover -s nuplan-evaluations/tests -v
+            "$RUNNER_TEMP/igo-ci-venv/bin/python" -m compileall -q nuplan-evaluations
           else
             echo "nuplan-evaluations not present in this merge tree; skipping adapter tests"
           fi

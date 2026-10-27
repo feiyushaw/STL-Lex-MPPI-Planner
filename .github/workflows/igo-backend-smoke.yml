@@ -167,7 +167,7 @@ jobs:
 
   nuplan-mini-real-replay:
     if: \${{ github.event.pull_request.number == 6 }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, contana-ubuntu]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

@@ -166,7 +166,7 @@ jobs:
             commonroad-evaluations/lex_stl_planner/cpp/planner/mppi_planner.cpp
 
   nuplan-mini-real-replay:
-    if: \${{ github.event.pull_request.number == 6 }}
+    if: ${{ github.event.pull_request.number == 6 }}
     runs-on: [self-hosted, linux, x64, contana-ubuntu]
     timeout-minutes: 90
     steps:

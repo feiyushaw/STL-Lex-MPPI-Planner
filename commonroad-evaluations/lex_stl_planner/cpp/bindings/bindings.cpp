@@ -240,7 +240,8 @@ PYBIND11_MODULE(lex_stl_planner_bindings, m)
         .def_readwrite("solve_time", &PlannerResult::solve_time)
         .def_readwrite("x_samples", &PlannerResult::x_samples)
         .def_readwrite("best_overall_sample", &PlannerResult::best_overall_sample)
-        .def_readwrite("success", &PlannerResult::success);
+        .def_readwrite("success", &PlannerResult::success)
+        .def_readwrite("failure_reason", &PlannerResult::failure_reason);
 
     // Bind parameter schedule structs
     py::class_<MPPIPlanner::ParameterSchedule>(m, "ParameterSchedule")

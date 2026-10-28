@@ -5,12 +5,11 @@ on:
     branches:
       - igo
       - main
+      - feat/replace-mppi-with-fom-igo
     paths:
-      - "commonroad-evaluations/CMakeLists.txt"
-      - "commonroad-evaluations/config/**"
-      - "commonroad-evaluations/lex_stl_planner/cpp/config/**"
-      - "commonroad-evaluations/lex_stl_planner/cpp/planner/**"
-      - "commonroad-evaluations/lex_stl_planner/tests/**"
+      - "commonroad-evaluations/**"
+      - "effects-of-discretization-and-solver-evaluations/**"
+      - "nuplan-evaluations/**"
       - ".github/workflows/igo-backend-smoke.yml"
 
 permissions:
@@ -19,13 +18,53 @@ permissions:
 jobs:
   igo-cxx-smoke:
     runs-on: [self-hosted, docker]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install lightweight C++ dependencies
+      - name: Install C++ and Python prerequisites using official Ubuntu archives
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev
+          set -euxo pipefail
+          cat > "$RUNNER_TEMP/igo-ubuntu.sources" <<'EOF'
+          Types: deb
+          URIs: https://archive.ubuntu.com/ubuntu
+          Suites: noble noble-updates noble-backports
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: https://security.ubuntu.com/ubuntu
+          Suites: noble-security
+          Components: main universe restricted multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          APT_SOURCE_ARGS=(
+            -o "Dir::Etc::sourcelist=$RUNNER_TEMP/igo-ubuntu.sources"
+            -o "Dir::Etc::sourceparts=-"
+            -o "APT::Get::List-Cleanup=0"
+          )
+          sudo apt-get "${APT_SOURCE_ARGS[@]}" update
+          sudo apt-get "${APT_SOURCE_ARGS[@]}" install -y --no-install-recommends \
+            cmake g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev libpagmo-dev python3-venv python3-dev
+          python3 -m venv "$RUNNER_TEMP/igo-ci-venv"
+          "$RUNNER_TEMP/igo-ci-venv/bin/python" -m pip install --disable-pip-version-check "setuptools<70" wheel
+          "$RUNNER_TEMP/igo-ci-venv/bin/python" -m pip install --disable-pip-version-check numpy scipy pytest pyyaml pybind11
+          if [[ -f effects-of-discretization-and-solver-evaluations/tests/test_fixed_budget_benchmark.py ]]; then
+            "$RUNNER_TEMP/igo-ci-venv/bin/python" -m pip install --disable-pip-version-check --no-build-isolation pyinterval
+          fi
+
+      - name: Verify host C++ dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          command -v g++
+          test -r /usr/include/eigen3/Eigen/Core
+          test -r /usr/include/yaml-cpp/yaml.h
+          test -r /usr/include/boost/version.hpp
+          test -r /usr/include/spdlog/spdlog.h
+          ldconfig -p | grep -q 'libyaml-cpp'
+          g++ --version
 
       - name: Build and run block-xNES regression
         run: |
@@ -47,12 +86,66 @@ jobs:
           cd commonroad-evaluations
           /tmp/fom_igo_config_test
 
-      - name: Run Python FOM-IGO regression tests
+      - name: Run FOM, IGO, and fixed-budget Python regressions
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install numpy scipy pytest
+          set -euxo pipefail
           cd effects-of-discretization-and-solver-evaluations
-          python -m pytest -q tests/test_fom_igo_solver.py tests/test_fom_certificate_igo.py
+          tests=()
+          for path in \
+            tests/test_fom_certificate.py \
+            tests/test_fom_certificate_igo.py \
+            tests/test_fom_igo_solver.py \
+            tests/test_fixed_budget_benchmark.py; do
+            if [[ -f "$path" ]]; then tests+=("$path"); fi
+          done
+          if [[ ${#tests[@]} -eq 0 ]]; then
+            echo "No recognized FOM/IGO regression test files were found" >&2
+            exit 1
+          fi
+          printf 'Running tests: %s\n' "${tests[*]}"
+          "$RUNNER_TEMP/igo-ci-venv/bin/python" -m pytest -q "${tests[@]}"
+
+      - name: Run nuPlan Canonical JSONL adapter tests
+        shell: bash
+        run: |
+          if [[ -d nuplan-evaluations/tests ]]; then
+            "$RUNNER_TEMP/igo-ci-venv/bin/python" -m unittest discover -s nuplan-evaluations/tests -v
+            "$RUNNER_TEMP/igo-ci-venv/bin/python" -m compileall -q nuplan-evaluations
+          else
+            echo "nuplan-evaluations not present in this merge tree; skipping adapter tests"
+          fi
+
+      - name: Configure, build, and import the complete C++/pybind planner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -x /opt/nuplan_env/bin/python ]]; then
+            PY=/opt/nuplan_env/bin/python
+          else
+            PY="$RUNNER_TEMP/igo-ci-venv/bin/python"
+          fi
+          "$PY" -m pip install --disable-pip-version-check pybind11 pyyaml
+          PYBIND11_DIR="$("$PY" -m pybind11 --cmakedir)"
+          cmake -S commonroad-evaluations \
+            -B commonroad-evaluations/build-ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPython_EXECUTABLE="$PY" \
+            -DPython3_EXECUTABLE="$PY" \
+            -Dpybind11_DIR="$PYBIND11_DIR" \
+            -DBUILD_FOM_IGO_TESTS=ON
+          cmake --build commonroad-evaluations/build-ci --parallel 2
+          ctest --test-dir commonroad-evaluations/build-ci --output-on-failure
+          PYTHONPATH="$PWD/commonroad-evaluations" "$PY" - <<'PY'
+          from lex_stl_planner.lib.lex_stl_planner_bindings import Config, IGOPlanner
+          result_fields = ("success", "failure_reason", "solve_time")
+          from lex_stl_planner.lib.lex_stl_planner_bindings import PlannerResult
+          result = PlannerResult()
+          missing = [name for name in result_fields if not hasattr(result, name)]
+          if missing:
+              raise SystemExit(f"pybind PlannerResult fields missing: {missing}")
+          print(f"pybind ABI/import OK: Config={Config.__name__}, IGOPlanner={IGOPlanner.__name__}")
+          PY
 
       - name: Syntax-check production IGO planner translation unit
         run: |
@@ -71,3 +164,104 @@ jobs:
             -Icommonroad-evaluations/external/third_party/lhslib/src/lhslib \
             -Icommonroad-evaluations/external/third_party/lhslib/src/bclib \
             commonroad-evaluations/lex_stl_planner/cpp/planner/mppi_planner.cpp
+
+  nuplan-mini-real-replay:
+    if: ${{ github.event.pull_request.number == 6 || github.event.pull_request.number == 1 }}
+    runs-on: [self-hosted, linux, x64, nuplan-host]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify host nuPlan Python ABI and dataset
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -x /opt/nuplan_env/bin/python
+          test -d /data/datasets/nuplan/dataset/nuplan-v1.1_mini/splits/mini
+          test -d /data/datasets/nuplan/dataset/maps
+          /opt/nuplan_env/bin/python - <<'PY'
+          import sys
+          import nuplan
+          if sys.version_info[:2] != (3, 10):
+              raise SystemExit(f"Expected Python 3.10 ABI for nuPlan, got {sys.version}")
+          print(f"nuPlan runtime: Python {sys.version}")
+          print(f"nuPlan package: {nuplan.__file__}")
+          PY
+
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev libpagmo-dev
+          /opt/nuplan_env/bin/python -m pip install --disable-pip-version-check pybind11 pyyaml
+
+      - name: Build and test pybind module with nuPlan Python ABI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PY=/opt/nuplan_env/bin/python
+          PYBIND11_DIR="$("$PY" -m pybind11 --cmakedir)"
+          cmake -S commonroad-evaluations \
+            -B commonroad-evaluations/build-nuplan-ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPYTHON_EXECUTABLE="$PY" \
+            -DPython_EXECUTABLE="$PY" \
+            -DPython3_EXECUTABLE="$PY" \
+            -Dpybind11_DIR="$PYBIND11_DIR" \
+            -DBUILD_FOM_IGO_TESTS=ON
+          cmake --build commonroad-evaluations/build-nuplan-ci --parallel 2
+          ctest --test-dir commonroad-evaluations/build-nuplan-ci --output-on-failure
+          PYTHONPATH="$GITHUB_WORKSPACE/commonroad-evaluations" "$PY" - <<'PY'
+          from lex_stl_planner.lib.lex_stl_planner_bindings import Config, IGOPlanner, PlannerResult
+          result = PlannerResult()
+          assert hasattr(result, "failure_reason")
+          print(f"nuPlan ABI pybind import OK: {Config.__name__}, {IGOPlanner.__name__}")
+          PY
+
+      - name: Export 10 real nuPlan mini scenarios
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PY=/opt/nuplan_env/bin/python
+          ROOT=/data/datasets/nuplan/dataset
+          OUT="$RUNNER_TEMP/stl_lex_igo_nuplan"
+          mkdir -p "$OUT"
+          export NUPLAN_DATA_ROOT="$ROOT"
+          export NUPLAN_MAPS_ROOT="$ROOT/maps"
+          "$PY" nuplan-evaluations/export_nuplan_mini.py \
+            --data-root "$ROOT" \
+            --db-dir "$ROOT/nuplan-v1.1_mini/splits/mini" \
+            --map-root "$ROOT/maps" \
+            --map-version nuplan-maps-v1.0 \
+            --output "$OUT/canonical.jsonl" \
+            --limit-scenarios 10 \
+            --candidate-scenarios 60 \
+            --max-anchors-per-scenario 20 \
+            --subsample-ratio 0.25
+
+      - name: Run continuous nuPlan mini replay and enforce 90 percent success
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PY=/opt/nuplan_env/bin/python
+          OUT="$RUNNER_TEMP/stl_lex_igo_nuplan"
+          export PYTHONPATH="$GITHUB_WORKSPACE/commonroad-evaluations:$GITHUB_WORKSPACE/nuplan-evaluations"
+          "$PY" nuplan-evaluations/run_nuplan_canonical.py \
+            --input "$OUT/canonical.jsonl" \
+            --config commonroad-evaluations/config/default_config.yaml \
+            --output-dir "$OUT/replay" \
+            --max-scenarios 10 \
+            --max-frames-per-scenario 20 \
+            --min-backward-distance-m 12 \
+            --min-success-rate 0.90
+
+      - name: Archive Canonical input and replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuplan-mini-lexstl-replay
+          path: ${{ runner.temp }}/stl_lex_igo_nuplan/
+          if-no-files-found: warn
+          retention-days: 30

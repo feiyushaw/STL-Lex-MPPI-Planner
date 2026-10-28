@@ -193,7 +193,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \\
+          sudo apt-get install -y --no-install-recommends \
             cmake g++ libeigen3-dev libyaml-cpp-dev libboost-dev libspdlog-dev libpagmo-dev
           /opt/nuplan_env/bin/python -m pip install --disable-pip-version-check pybind11 pyyaml
 
@@ -203,12 +203,12 @@ jobs:
           set -euxo pipefail
           PY=/opt/nuplan_env/bin/python
           PYBIND11_DIR="$("$PY" -m pybind11 --cmakedir)"
-          cmake -S commonroad-evaluations \\
-            -B commonroad-evaluations/build-nuplan-ci \\
-            -DCMAKE_BUILD_TYPE=Release \\
-            -DPython_EXECUTABLE="$PY" \\
-            -DPython3_EXECUTABLE="$PY" \\
-            -Dpybind11_DIR="$PYBIND11_DIR" \\
+          cmake -S commonroad-evaluations \
+            -B commonroad-evaluations/build-nuplan-ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPython_EXECUTABLE="$PY" \
+            -DPython3_EXECUTABLE="$PY" \
+            -Dpybind11_DIR="$PYBIND11_DIR" \
             -DBUILD_FOM_IGO_TESTS=ON
           cmake --build commonroad-evaluations/build-nuplan-ci --parallel 2
           ctest --test-dir commonroad-evaluations/build-nuplan-ci --output-on-failure
@@ -229,15 +229,15 @@ jobs:
           mkdir -p "$OUT"
           export NUPLAN_DATA_ROOT="$ROOT"
           export NUPLAN_MAPS_ROOT="$ROOT/maps"
-          "$PY" nuplan-evaluations/export_nuplan_mini.py \\
-            --data-root "$ROOT" \\
-            --db-dir "$ROOT/nuplan-v1.1_mini/splits/mini" \\
-            --map-root "$ROOT/maps" \\
-            --map-version nuplan-maps-v1.0 \\
-            --output "$OUT/canonical.jsonl" \\
-            --limit-scenarios 10 \\
-            --candidate-scenarios 60 \\
-            --max-anchors-per-scenario 20 \\
+          "$PY" nuplan-evaluations/export_nuplan_mini.py \
+            --data-root "$ROOT" \
+            --db-dir "$ROOT/nuplan-v1.1_mini/splits/mini" \
+            --map-root "$ROOT/maps" \
+            --map-version nuplan-maps-v1.0 \
+            --output "$OUT/canonical.jsonl" \
+            --limit-scenarios 10 \
+            --candidate-scenarios 60 \
+            --max-anchors-per-scenario 20 \
             --subsample-ratio 0.25
 
       - name: Run continuous nuPlan mini replay and enforce 90 percent success
@@ -247,13 +247,13 @@ jobs:
           PY=/opt/nuplan_env/bin/python
           OUT="$RUNNER_TEMP/stl_lex_igo_nuplan"
           export PYTHONPATH="$GITHUB_WORKSPACE/commonroad-evaluations:$GITHUB_WORKSPACE/nuplan-evaluations"
-          "$PY" nuplan-evaluations/run_nuplan_canonical.py \\
-            --input "$OUT/canonical.jsonl" \\
-            --config commonroad-evaluations/config/default_config.yaml \\
-            --output-dir "$OUT/replay" \\
-            --max-scenarios 10 \\
-            --max-frames-per-scenario 20 \\
-            --min-backward-distance-m 12 \\
+          "$PY" nuplan-evaluations/run_nuplan_canonical.py \
+            --input "$OUT/canonical.jsonl" \
+            --config commonroad-evaluations/config/default_config.yaml \
+            --output-dir "$OUT/replay" \
+            --max-scenarios 10 \
+            --max-frames-per-scenario 20 \
+            --min-backward-distance-m 12 \
             --min-success-rate 0.90
 
       - name: Archive Canonical input and replay evidence

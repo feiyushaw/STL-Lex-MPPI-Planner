@@ -279,7 +279,7 @@ def main() -> int:
         limit_total_scenarios=args.candidate_scenarios,
         timestamp_threshold_s=None,
         ego_displacement_minimum_m=None,
-        expand_scenarios=True,
+        expand_scenarios=False,
         remove_invalid_goals=False,
         shuffle=False,
     )

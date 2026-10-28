@@ -206,6 +206,7 @@ jobs:
           cmake -S commonroad-evaluations \
             -B commonroad-evaluations/build-nuplan-ci \
             -DCMAKE_BUILD_TYPE=Release \
+            -DPYTHON_EXECUTABLE="$PY" \
             -DPython_EXECUTABLE="$PY" \
             -DPython3_EXECUTABLE="$PY" \
             -Dpybind11_DIR="$PYBIND11_DIR" \
